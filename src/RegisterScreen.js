@@ -6,6 +6,9 @@ import {
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { auth, db } from "../database";
+import { createUserWithEmailAndPassword } from "firebase/auth";
+import { collection, addDoc, doc, setDoc } from "firebase/firestore";
 
 const Colors = {
   green: "#1E5B3F",
@@ -32,26 +35,60 @@ export default function RegisterScreen({ navigation }) {
   const [secure2, setSecure2] = useState(true);
 
   const confirmRegister = async () => {
-    // Validaciones básicas (opcional)
+    // Validaciones básicas
     if (!name.trim()) return Alert.alert("Falta nombre", "Ingresa tu nombre completo.");
     if (!email.trim()) return Alert.alert("Falta correo", "Ingresa tu correo electrónico.");
     if (pass.length < 6) return Alert.alert("Contraseña corta", "Mínimo 6 caracteres.");
     if (pass !== confirm) return Alert.alert("No coincide", "Las contraseñas no coinciden.");
     if (!accept) return Alert.alert("Términos", "Debes aceptar los términos y condiciones.");
 
-    // Guardar cerdos totales en AsyncStorage
-    const herd = parseInt(herdSize, 10);
-    const safeHerd = Number.isFinite(herd) && herd >= 0 ? herd : 0;
     try {
-      await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: safeHerd }));
-    } catch (e) {
-      console.warn("No se pudo guardar herdSize:", e);
-    }
+      console.log("🔥 Iniciando registro en Firebase...");
+      
+      // 1. Crear usuario en Firebase Auth
+      const userCredential = await createUserWithEmailAndPassword(auth, email, pass);
+      const user = userCredential.user;
+      
+      console.log("✅ Usuario creado en Auth:", user.uid);
 
-    // Ir al Home (Tabs)
-    Alert.alert("Registro completado", "Tu cuenta fue creada correctamente.", [
-      { text: "Continuar", onPress: () => navigation.reset({ index: 0, routes: [{ name: "Tabs" }] }) },
-    ]);
+      // 2. Guardar datos del productor en Firestore
+      const producerData = {
+        uid: user.uid,
+        name: name.trim(),
+        email: email.trim(),
+        phone: phone.trim(),
+        farmNumber: farmNumber.trim(),
+        herdSize: parseInt(herdSize, 10) || 0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      await setDoc(doc(db, "producers", user.uid), producerData);
+      console.log("✅ Datos del productor guardados en Firestore");
+
+      // 3. Guardar cerdos totales en AsyncStorage (para compatibilidad)
+      const safeHerd = Number.isFinite(producerData.herdSize) && producerData.herdSize >= 0 ? producerData.herdSize : 0;
+      await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: safeHerd }));
+
+      // 4. Ir al Home
+      Alert.alert("Registro exitoso", "Tu cuenta fue creada correctamente en Firebase.", [
+        { text: "Continuar", onPress: () => navigation.reset({ index: 0, routes: [{ name: "Tabs" }] }) },
+      ]);
+
+    } catch (error) {
+      console.error("❌ Error en el registro:", error);
+      
+      let errorMessage = "Error al crear la cuenta";
+      if (error.code === "auth/email-already-in-use") {
+        errorMessage = "Este correo ya está registrado";
+      } else if (error.code === "auth/weak-password") {
+        errorMessage = "La contraseña es muy débil";
+      } else if (error.code === "auth/invalid-email") {
+        errorMessage = "El correo no es válido";
+      }
+      
+      Alert.alert("Error de registro", errorMessage);
+    }
   };
 
   return (
