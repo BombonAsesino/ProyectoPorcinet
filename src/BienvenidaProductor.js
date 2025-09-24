@@ -11,7 +11,7 @@ import {
 } from "react-native";
 
 const Colors = {
-  green: "#1E5B3F",
+  green: "#843a3a",
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
