@@ -1,10 +1,11 @@
-// Archivo principal de la base de datos
-// Exporta todas las configuraciones y servicios de Firebase
+// index.js — Punto de entrada de la base de datos
+// Centraliza y reexporta los servicios de Firebase
 
-export { default as firebaseApp, auth, db, realtimeDb, storage } from './firebaseConfig';
-
-// Servicios adicionales que puedas necesitar
+// Exportar todo lo de firebaseConfig (auth, db, realtimeDb, storage, etc.)
 export * from './firebaseConfig';
 
-// Función de prueba de conexión
+// Exportar la app principal (default)
+export { default as firebaseApp } from './firebaseConfig';
+
+// Exportar función de prueba de conexión
 export { testFirebaseConnection } from './testConnection';

@@ -1,454 +1,425 @@
 // src/BackupApp.js
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
-  Switch,
-  Pressable,
   StyleSheet,
+  TouchableOpacity,
+  FlatList,
   Alert,
   ActivityIndicator,
-  FlatList,
 } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { MaterialCommunityIcons, Ionicons } from "@expo/vector-icons";
-
-// 🔹 Firebase (tu módulo centralizado)
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { auth, db } from "../database";
+
+// Firestore
 import {
   collection,
-  addDoc,
-  getDocs,
-  getDoc,
-  doc,
   query,
+  where,
   orderBy,
-  deleteDoc,
-  serverTimestamp,
+  onSnapshot,
+  getDocs,
+  doc,
+  setDoc,
+  getDoc,
+  writeBatch,
 } from "firebase/firestore";
 
-/* =======================
-   Paleta y utilidades
-======================= */
 const Colors = {
-  green: "#1E5B3F",
-  greenDark: "#15432F",
+  green: "#843a3a",
   beige: "#FFF7EA",
   text: "#0f172a",
-  outline: "#1E5B3F",
   white: "#FFFFFF",
   muted: "#6b7280",
-  card: "#F9F3E6",
+  card: "#F1E9D6",
+  border: "rgba(0,0,0,0.08)",
 };
 
-function formatDateTime(d) {
-  if (!d) return "—";
+function fmt(ts) {
   try {
-    return new Date(d).toLocaleString("es-NI", {
-      dateStyle: "long",
-      timeStyle: "short",
-    });
+    const d = new Date(ts);
+    return `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
   } catch {
-    const dt = new Date(d);
-    return `${dt.getDate()}/${dt.getMonth() + 1}/${dt.getFullYear()} ${dt
-      .getHours()
-      .toString()
-      .padStart(2, "0")}:${dt.getMinutes().toString().padStart(2, "0")}`;
+    return String(ts);
   }
 }
 
-/* ============ Claves locales a respaldar (ajústalas a tu app) ============ */
-const STATS_KEY = "@porcinet_stats";
-const REPRO_KEY = "@repro_events";
-const COSTS_KEY = "@costs_local_state";
-const KEYS_TO_BACKUP = [STATS_KEY, REPRO_KEY, COSTS_KEY];
+/* ============================
+   Cargar datos a respaldar
+============================ */
+async function fetchCosts(uid) {
+  const out = [];
+  const q = query(
+    collection(db, "costs"),
+    where("uid", "==", uid),
+    orderBy("date", "desc")
+  );
+  const snap = await getDocs(q);
+  snap.forEach((d) => out.push({ id: d.id, ...d.data() }));
+  return out;
+}
 
-/* Helpers Firestore */
-async function getOrCreateDeviceId() {
-  const DEVICE_KEY = "@porcinet_device_id";
-  let id = await AsyncStorage.getItem(DEVICE_KEY);
-  if (!id) {
-    id = Math.random().toString(36).slice(2) + Date.now().toString(36);
-    await AsyncStorage.setItem(DEVICE_KEY, id);
+async function buildBackupPayload(uid) {
+  const costs = await fetchCosts(uid);
+  return {
+    version: 1,
+    uid,
+    createdAt: Date.now(),
+    data: { costs },
+  };
+}
+
+/* ============================
+   Respaldo en Firestore (no Storage)
+============================ */
+async function createBackup(uid) {
+  // leer costos directamente aquí (con fallback si falta índice)
+  let costs = [];
+  try {
+    const q = query(
+      collection(db, "costs"),
+      where("uid", "==", uid),
+      orderBy("createdAt", "desc")
+    );
+    const snap = await getDocs(q);
+    costs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch {
+    const q2 = query(collection(db, "costs"), where("uid", "==", uid));
+    const snap2 = await getDocs(q2);
+    costs = snap2.docs.map((d) => ({ id: d.id, ...d.data() }));
   }
-  return id;
-}
 
-async function ownerId() {
-  const uid = auth?.currentUser?.uid;
-  if (uid) return `uid-${uid}`;
-  const deviceId = await getOrCreateDeviceId();
-  return `device-${deviceId}`;
-}
-
-async function gatherLocalData() {
-  const data = {};
-  for (const k of KEYS_TO_BACKUP) {
-    try {
-      const raw = await AsyncStorage.getItem(k);
-      data[k] = raw ? JSON.parse(raw) : null;
-    } catch {
-      data[k] = null;
-    }
-  }
-  return data;
-}
-
-/* =======================
-   Pantalla: Respaldos
-======================= */
-export function BackupScreen({ navigation }) {
-  const [autoBackup, setAutoBackup] = useState(false);
-  const [lastBackup, setLastBackup] = useState(null);
-  const [loading, setLoading] = useState(false);
-
-  const loadState = useCallback(async () => {
-    const [auto, last] = await Promise.all([
-      AsyncStorage.getItem("autoBackupEnabled"),
-      AsyncStorage.getItem("lastBackup"),
-    ]);
-    setAutoBackup(auto === "true");
-    if (last) setLastBackup(last);
-  }, []);
-
-  useEffect(() => {
-    loadState();
-  }, [loadState]);
-
-  const toggleAutoBackup = async (value) => {
-    setAutoBackup(value);
-    await AsyncStorage.setItem("autoBackupEnabled", value ? "true" : "false");
+  const payload = {
+    version: 1,
+    uid,
+    createdAt: Date.now(),
+    data: { costs },
   };
 
-  const doBackupNow = async () => {
-    if (loading) return;
-    setLoading(true);
+  const json = JSON.stringify(payload);
+  const ts = payload.createdAt;
+  const backupId = `${uid}_${ts}`;
+  const ref = doc(collection(db, "backups"), backupId);
+
+  await setDoc(ref, {
+    uid,
+    createdAt: ts,
+    sizeBytes: json.length,
+    version: payload.version,
+    collections: ["costs"],
+    payload: json, // guardamos el JSON como texto
+  });
+
+  return { id: backupId, createdAt: ts };
+}
+
+async function readBackupDoc(backupId) {
+  const ref = doc(collection(db, "backups"), backupId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("Respaldo no encontrado");
+  const data = snap.data();
+  return JSON.parse(String(data.payload || "{}"));
+}
+
+async function restoreCosts(uid, items = []) {
+  if (!Array.isArray(items)) return;
+  const batch = writeBatch(db);
+  items.forEach((it) => {
+    const id = it.id ?? `${uid}_${it.date ?? Date.now()}`;
+    const { id: _omit, ...rest } = it;
+    batch.set(doc(collection(db, "costs"), id), { ...rest, uid });
+  });
+  await batch.commit();
+}
+
+/* ============================
+   Pantalla principal (crear/restore)
+============================ */
+export function BackupScreen({ navigation }) {
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState(null); // { id, createdAt, sizeBytes, ... }
+
+  useEffect(() => {
+    const u = auth.currentUser;
+    if (!u) return;
+
+    const qHist = query(
+      collection(db, "backups"),
+      where("uid", "==", u.uid),
+      orderBy("createdAt", "desc")
+    );
+    const off = onSnapshot(qHist, (snap) => {
+      const arr = [];
+      snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+      setLast(arr[0] ?? null);
+    });
+    return () => off();
+  }, []);
+
+  const doBackup = async () => {
+    const u = auth.currentUser;
+    if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
+    try {
+      setBusy(true);
+      setStatus("Preparando respaldo…");
+      const res = await createBackup(u.uid);
+      setStatus(`Respaldo creado: ${fmt(res.createdAt)}`);
+      Alert.alert("Listo", "Respaldo creado correctamente.");
+    } catch (e) {
+      console.log("createBackup error", e);
+      Alert.alert("Error", String(e?.message ?? e));
+      setStatus("Error al crear respaldo");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doRestoreLast = async () => {
+    const u = auth.currentUser;
+    if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
+    if (!last?.id) return Alert.alert("Sin respaldo", "Aún no tienes respaldos.");
 
     try {
-      const owner = await ownerId();
-      const col = collection(db, "backups", owner, "items");
+      setBusy(true);
+      setStatus("Descargando respaldo…");
+      const payload = await readBackupDoc(last.id);
 
-      const payload = await gatherLocalData();
-      const createdAt = new Date();
+      // Validación mínima
+      if (!payload?.data || payload.uid !== u.uid) {
+        throw new Error("Respaldo inválido o de otro usuario.");
+      }
 
-      // Guarda respaldo como documento Firestore
-      await addDoc(col, {
-        meta: {
-          owner,
-          uid: auth?.currentUser?.uid || null,
-          app: "Porcinet",
-          version: 1,
-        },
-        data: payload,
-        createdAt: serverTimestamp(), // para ordenar en el servidor
-        createdAtLocal: createdAt.toISOString(), // para mostrar mientras resuelve el serverTimestamp
-      });
-
-      // Actualiza "último respaldo" local
-      await AsyncStorage.setItem("lastBackup", createdAt.toISOString());
-      setLastBackup(createdAt.toISOString());
-
-      Alert.alert("Listo", "Respaldo guardado en Firestore ✅");
-    } catch (err) {
-      console.log("firestore error:", err?.code, err?.message);
-      Alert.alert("Error al respaldar", String(err?.message || err));
+      setStatus("Restaurando datos (costos) …");
+      await restoreCosts(u.uid, payload.data.costs ?? []);
+      setStatus("Datos restaurados.");
+      Alert.alert("Listo", "Se restauraron los costos del respaldo.");
+    } catch (e) {
+      console.log("restore error", e);
+      Alert.alert("Error", String(e?.message ?? e));
+      setStatus("Error al restaurar");
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: Colors.beige }]}>
-      <View style={styles.headerSpacer} />
+    <View style={{ flex: 1, backgroundColor: Colors.beige, padding: 16 }}>
+      <View style={styles.panel}>
+        <Text style={styles.title}>Respaldos en la nube</Text>
 
-      <View style={styles.avatarWrap}>
-        <MaterialCommunityIcons name="pig" size={96} color="#ef7896" />
+        <TouchableOpacity
+          style={[styles.btn, busy && { opacity: 0.7 }]}
+          onPress={doBackup}
+          disabled={busy}
+        >
+          <MaterialCommunityIcons name="cloud-upload" size={18} color={Colors.white} />
+          <Text style={styles.btnText}>{busy ? "Procesando…" : "Crear respaldo"}</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.btnLight, busy && { opacity: 0.7 }]}
+          onPress={doRestoreLast}
+          disabled={busy}
+        >
+          <MaterialCommunityIcons name="cloud-download" size={18} color={Colors.green} />
+          <Text style={styles.btnLightText}>Restaurar último respaldo</Text>
+        </TouchableOpacity>
+
+        <View style={{ marginTop: 8 }}>
+          <Text style={styles.smallLabel}>Estado</Text>
+          <Text style={styles.smallText}>{status || "Listo"}</Text>
+        </View>
+
+        <View style={{ marginTop: 10 }}>
+          <Text style={styles.smallLabel}>Último respaldo</Text>
+          {last ? (
+            <Text style={styles.smallText}>
+              {fmt(last.createdAt)} · {Math.round((last.sizeBytes ?? 0) / 1024)} KB
+            </Text>
+          ) : (
+            <Text style={styles.smallText}>—</Text>
+          )}
+        </View>
+
+        {busy ? (
+          <View style={{ marginTop: 10 }}>
+            <ActivityIndicator color={Colors.green} />
+          </View>
+        ) : null}
       </View>
 
-      <Text style={styles.title}>Respaldos{"\n"}en la nube</Text>
-
-      <View style={styles.row}>
-        <Text style={styles.rowLabel}>Respaldos automáticos</Text>
-        <Switch
-          value={autoBackup}
-          onValueChange={toggleAutoBackup}
-          trackColor={{ true: Colors.green }}
-          thumbColor={autoBackup ? Colors.white : "#f4f3f4"}
-        />
-      </View>
-
-      <Text style={styles.helper}>
-        Último respaldo:{" "}
-        <Text style={styles.helperBold}>
-          {lastBackup ? formatDateTime(lastBackup) : "—"}
+      {/* Panel Historial con navegación */}
+      <View style={styles.panel}>
+        <Text style={styles.title}>Historial</Text>
+        <Text style={styles.smallText}>
+          Para ver todos tus respaldos, abre “Historial de respaldos”.
         </Text>
-      </Text>
 
-      <Pressable
-        onPress={doBackupNow}
-        style={({ pressed }) => [
-          styles.primaryBtn,
-          pressed && { backgroundColor: Colors.greenDark },
-        ]}
-      >
-        {loading ? (
-          <ActivityIndicator color={Colors.white} />
-        ) : (
-          <Text style={styles.primaryBtnText}>Respaldar ahora</Text>
-        )}
-      </Pressable>
-
-      <Pressable
-        onPress={() => navigation.navigate("Historial")}
-        style={({ pressed }) => [styles.outlineBtn, pressed && { opacity: 0.85 }]}
-      >
-        <Text style={styles.outlineBtnText}>Ver respaldos anteriores</Text>
-      </Pressable>
+        <TouchableOpacity
+          style={[styles.rowBtn, { alignSelf: "flex-start", marginTop: 10 }]}
+          onPress={() => navigation?.navigate("Historial")}
+        >
+          <MaterialCommunityIcons name="history" size={18} color={Colors.white} />
+          <Text style={styles.rowBtnText}>Abrir historial de respaldos</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
 
-/* =======================
-   Pantalla: Historial (Firestore)
-======================= */
-export function BackupHistoryScreen({ navigation }) {
+/* ============================
+   Pantalla de historial
+============================ */
+export function BackupHistoryScreen() {
   const [items, setItems] = useState([]);
-  const [busy, setBusy] = useState(false);
-
-  const loadHistory = useCallback(async () => {
-    try {
-      setBusy(true);
-      const owner = await ownerId();
-      const col = collection(db, "backups", owner, "items");
-
-      // Ordena por createdAt (server) descendente
-      const q = query(col, orderBy("createdAt", "desc"));
-      const snap = await getDocs(q);
-
-      const rows = snap.docs.map((d) => {
-        const data = d.data();
-        // createdAt puede estar pendiente; usa createdAtLocal como fallback
-        const created =
-          (data.createdAt && data.createdAt.toDate && data.createdAt.toDate()) ||
-          (data.createdAtLocal ? new Date(data.createdAtLocal) : null);
-        return {
-          id: d.id,
-          createdAt: created ? created.toISOString() : null,
-        };
-      });
-
-      setItems(rows);
-    } catch (err) {
-      console.log("history error:", err?.code, err?.message);
-      Alert.alert("Error", String(err?.message || err));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  const [busy, setBusy] = useState(true);
 
   useEffect(() => {
-    const unsub = navigation.addListener("focus", loadHistory);
-    return unsub;
-  }, [navigation, loadHistory]);
-
-  const restore = async (itemId) => {
-    try {
-      setBusy(true);
-      const owner = await ownerId();
-      const refDoc = doc(db, "backups", owner, "items", itemId);
-      const snap = await getDoc(refDoc);
-      if (!snap.exists()) {
-        Alert.alert("Ups", "El respaldo ya no existe.");
-        return;
-      }
-      const data = snap.data();
-      const payload = data?.data || {};
-
-      // Restaurar a AsyncStorage
-      const entries = Object.entries(payload);
-      for (const [key, value] of entries) {
-        if (!key) continue;
-        if (value === null || value === undefined) {
-          await AsyncStorage.removeItem(key);
-        } else {
-          await AsyncStorage.setItem(key, JSON.stringify(value));
-        }
-      }
-
-      Alert.alert("Restaurado", "Los datos fueron restaurados correctamente ✅");
-    } catch (err) {
-      console.log("restore error:", err?.code, err?.message);
-      Alert.alert("Error al restaurar", String(err?.message || err));
-    } finally {
+    const u = auth.currentUser;
+    if (!u) {
+      setItems([]);
       setBusy(false);
+      return;
     }
-  };
+    const qHist = query(
+      collection(db, "backups"),
+      where("uid", "==", u.uid),
+      orderBy("createdAt", "desc")
+    );
+    const off = onSnapshot(
+      qHist,
+      (snap) => {
+        const arr = [];
+        snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+        setItems(arr);
+        setBusy(false);
+      },
+      () => setBusy(false)
+    );
+    return () => off();
+  }, []);
 
-  const removeItem = async (itemId) => {
+  const restoreOne = async (it) => {
+    const u = auth.currentUser;
+    if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
     try {
       setBusy(true);
-      const owner = await ownerId();
-      const refDoc = doc(db, "backups", owner, "items", itemId);
-      await deleteDoc(refDoc);
-      await loadHistory();
-      Alert.alert("Eliminado", "Respaldo eliminado.");
-    } catch (err) {
-      console.log("delete error:", err?.code, err?.message);
-      Alert.alert("Error al eliminar", String(err?.message || err));
+      const payload = await readBackupDoc(it.id);
+      if (!payload?.data || payload.uid !== u.uid) {
+        throw new Error("Respaldo inválido o de otro usuario.");
+      }
+      await restoreCosts(u.uid, payload.data.costs ?? []);
+      Alert.alert("Listo", "Se restauraron los costos del respaldo seleccionado.");
+    } catch (e) {
+      console.log("restore one error", e);
+      Alert.alert("Error", String(e?.message ?? e));
     } finally {
       setBusy(false);
     }
   };
 
   const renderItem = ({ item }) => (
-    <View style={styles.historyItem}>
-      <Ionicons name="cloud-done-outline" size={22} color={Colors.green} />
+    <View style={styles.row}>
       <View style={{ flex: 1 }}>
-        <Text style={styles.historyText}>{formatDateTime(item.createdAt)}</Text>
+        <Text style={styles.rowTitle}>{fmt(item.createdAt)}</Text>
+        <Text style={styles.rowSub}>
+          {Math.round((item.sizeBytes ?? 0) / 1024)} KB · {item.collections?.join(", ")}
+        </Text>
       </View>
-
-      <Pressable
-        onPress={() => restore(item.id)}
-        style={({ pressed }) => [styles.smallBtn, pressed && { opacity: 0.85 }]}
-      >
-        <Text style={styles.smallBtnText}>Restaurar</Text>
-      </Pressable>
-
-      <Pressable
-        onPress={() =>
-          Alert.alert("Eliminar", "¿Eliminar este respaldo?", [
-            { text: "Cancelar", style: "cancel" },
-            { text: "Eliminar", style: "destructive", onPress: () => removeItem(item.id) },
-          ])
-        }
-        style={({ pressed }) => [styles.smallBtnOutline, pressed && { opacity: 0.85 }]}
-      >
-        <Text style={styles.smallBtnOutlineText}>Eliminar</Text>
-      </Pressable>
+      <TouchableOpacity style={styles.rowBtn} onPress={() => restoreOne(item)}>
+        <MaterialCommunityIcons name="cloud-download" size={18} color={Colors.white} />
+        <Text style={styles.rowBtnText}>Restaurar</Text>
+      </TouchableOpacity>
     </View>
   );
 
   return (
-    <View style={[styles.container, { backgroundColor: Colors.beige }]}>
-      <Pressable
-        onPress={loadHistory}
-        style={({ pressed }) => [styles.outlineBtn, { marginBottom: 10 }, pressed && { opacity: 0.85 }]}
-      >
+    <View style={{ flex: 1, backgroundColor: Colors.beige, padding: 16 }}>
+      <View style={styles.panel}>
+        <Text style={styles.title}>Historial de respaldos</Text>
         {busy ? (
-          <ActivityIndicator color={Colors.outline} />
+          <ActivityIndicator color={Colors.green} />
         ) : (
-          <Text style={styles.outlineBtnText}>Actualizar</Text>
+          <FlatList
+            data={items}
+            keyExtractor={(it) => it.id}
+            renderItem={renderItem}
+            ListEmptyComponent={<Text style={styles.smallText}>Aún no tienes respaldos.</Text>}
+            ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          />
         )}
-      </Pressable>
-
-      {items.length === 0 && !busy ? (
-        <Text style={styles.empty}>Aún no hay respaldos.</Text>
-      ) : (
-        <FlatList
-          data={items}
-          keyExtractor={(it) => it.id}
-          renderItem={renderItem}
-          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-          contentContainerStyle={{ paddingTop: 8 }}
-        />
-      )}
+      </View>
     </View>
   );
 }
 
-/* =======================
+/* ============================
    Estilos
-======================= */
+============================ */
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingHorizontal: 20,
-    paddingTop: 12,
+  panel: {
+    backgroundColor: Colors.white,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: 14,
+    marginBottom: 14,
   },
-  headerSpacer: { height: 4 },
-  avatarWrap: {
-    alignSelf: "center",
-    width: 112,
-    height: 112,
-    borderRadius: 56,
-    backgroundColor: Colors.card,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 8,
-    marginBottom: 16,
-    elevation: 2,
-  },
-  title: {
-    textAlign: "center",
-    fontSize: 28,
-    lineHeight: 32,
-    fontWeight: "800",
-    color: Colors.text,
-    marginBottom: 16,
-  },
-  row: {
+  title: { fontSize: 16, fontWeight: "900", color: Colors.text, marginBottom: 8 },
+
+  btn: {
+    backgroundColor: Colors.green,
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    alignSelf: "flex-start",
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: Colors.white,
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.05)",
+    gap: 8,
   },
-  rowLabel: { fontSize: 16, fontWeight: "600", color: Colors.text },
-  helper: { marginTop: 10, color: Colors.muted, fontSize: 14 },
-  helperBold: { color: Colors.text, fontWeight: "700" },
-  primaryBtn: {
-    marginTop: 18,
-    backgroundColor: Colors.green,
-    paddingVertical: 14,
-    borderRadius: 14,
-    alignItems: "center",
-  },
-  primaryBtnText: { color: Colors.white, fontWeight: "800", fontSize: 16 },
-  outlineBtn: {
-    marginTop: 10,
-    paddingVertical: 14,
-    borderRadius: 14,
-    alignItems: "center",
-    borderWidth: 2,
-    borderColor: Colors.outline,
-    backgroundColor: "transparent",
-  },
-  outlineBtnText: { color: Colors.outline, fontWeight: "800", fontSize: 16 },
-  empty: { color: Colors.muted, fontSize: 14 },
+  btnText: { color: Colors.white, fontWeight: "900" },
 
-  historyItem: {
+  btnLight: {
+    marginTop: 8,
+    backgroundColor: Colors.card,
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  btnLightText: { color: Colors.green, fontWeight: "900" },
+
+  smallLabel: { color: Colors.muted, fontWeight: "800", fontSize: 12 },
+  smallText: { color: Colors.text, fontWeight: "700" },
+
+  row: {
+    backgroundColor: Colors.card,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    backgroundColor: Colors.white,
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.06)",
   },
-  historyText: { fontSize: 15, color: Colors.text, fontWeight: "600" },
+  rowTitle: { fontWeight: "900", color: Colors.text },
+  rowSub: { color: Colors.muted, fontWeight: "700", marginTop: 2 },
 
-  smallBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+  rowBtn: {
     backgroundColor: Colors.green,
     borderRadius: 10,
-    marginLeft: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
-  smallBtnText: { color: Colors.white, fontWeight: "800", fontSize: 12 },
-
-  smallBtnOutline: {
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: "#b91c1c",
-    borderRadius: 10,
-    marginLeft: 6,
-  },
-  smallBtnOutlineText: { color: "#b91c1c", fontWeight: "800", fontSize: 12 },
+  rowBtnText: { color: Colors.white, fontWeight: "900" },
 });

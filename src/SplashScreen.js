@@ -7,8 +7,8 @@ const { width, height } = Dimensions.get("window");
 const DURATION = 4000; // 4 segundos
 
 const Colors = {
-  green: "#1E5B3F",
-  greenDark: "#184b35",
+  green: "#843a3a",
+  greenDark: "#ae2d2dff",
   beige: "#FFF7EA",
   white: "#FFFFFF",
   mint: "#D5F2E3",

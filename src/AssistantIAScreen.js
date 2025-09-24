@@ -12,7 +12,7 @@ const { width: SCREEN_W } = Dimensions.get("window");
 const scale = (n) => Math.round((SCREEN_W / 375) * n); // base 375px
 
 const Colors = {
-  green900: "#0E3B2A",
+  green900: "#843a3a",
   green700: "#1E5B3F",
   green600: "#206548",
   beige: "#FFF7EA",

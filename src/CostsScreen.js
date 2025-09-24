@@ -1,543 +1,501 @@
 // src/CostsScreen.js
-import React, { useEffect, useState } from "react";
+
+
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   View,
   Text,
-  Pressable,
   StyleSheet,
-  Modal,
+  ScrollView,
   TextInput,
-  KeyboardAvoidingView,
-  Platform,
   TouchableOpacity,
   Alert,
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { auth, db } from "../database";
+import {
+  collection,
+  addDoc,
+  query,
+  where,
+  getDocs,
+  serverTimestamp,
+  doc,
+  updateDoc,
+  deleteDoc,
+} from "firebase/firestore";
 
+/* ====== Estilos/colores ====== */
 const Colors = {
-  green: "#1E5B3F",
-  greenDark: "#15432F",
+  green: "#843a3a",
   beige: "#FFF7EA",
-  white: "#FFFFFF",
   text: "#0f172a",
+  white: "#FFFFFF",
   muted: "#6b7280",
-  card: "#F1E9D6",
-  brown: "#A57A3D",
+  border: "rgba(0,0,0,0.08)",
+  ok: "#843a3a",
+  bad: "#843a3a",
 };
 
-const DEFAULT_GASTOS = {
-  alimentacion: 800,
-  medicamentos: 450,
-  mantenimiento: 300,
-  otros: 150,
-  ingresos: 2500,
-};
 
-const MONTHS_ES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 
-const monthKey = (d) =>
-  `costs:${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+/* ====== Dominios ====== */
+const CATEGORIES = ["Alimentación", "Salud", "Mantenimiento"];
 
-function monthLabel(date = new Date()) {
-  const m = MONTHS_ES[date.getMonth()];
-  return `${m} ${date.getFullYear()}`;
+function getMonthKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-/* ====== Formateo a Córdobas (NIO) ====== */
-let nioFmt;
-try {
-  nioFmt = new Intl.NumberFormat("es-NI", {
-    style: "currency",
-    currency: "NIO",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
-} catch {}
-function formatNIO(v) {
-  if (nioFmt) return nioFmt.format(v);
-  const n = Math.round(Number(v) || 0).toLocaleString("es-NI");
-  return `C$ ${n}`;
-}
+/* =====================================================================================
+   PANTALLA: Gestión de costos y gastos
+   - Crear/editar/eliminar gastos (Alimentación/Salud/Mantenimiento)
+   - Reporte mensual + validación de cálculos
+   - Carga por mes actual (con navegación de meses)
+===================================================================================== */
+export function CostsScreen() {
+  const [expenses, setExpenses] = useState([]);
+  const [amount, setAmount] = useState("");
+  const [category, setCategory] = useState("Alimentación");
+  const [note, setNote] = useState("");
+  const [currentMonth, setCurrentMonth] = useState(new Date());
 
-/* Mini chart sin librerías */
-function MiniBars({ costos, ingresos }) {
-  const max = Math.max(costos, ingresos, 1);
-  const hC = (costos / max) * 90;
-  const hI = (ingresos / max) * 90;
-  return (
-    <View style={{ marginTop: 12 }}>
-      <View style={{ height: 110, alignItems: "center", justifyContent: "flex-end" }}>
-        <View style={{ flexDirection: "row", gap: 30, alignItems: "flex-end" }}>
-          <View style={{ alignItems: "center" }}>
-            <View style={{ width: 34, height: hC, backgroundColor: Colors.brown, borderTopLeftRadius: 8, borderTopRightRadius: 8 }} />
-            <Text style={styles.barLabel}>Costos</Text>
-          </View>
-          <View style={{ alignItems: "center" }}>
-            <View style={{ width: 34, height: hI, backgroundColor: Colors.green, borderTopLeftRadius: 8, borderTopRightRadius: 8 }} />
-            <Text style={styles.barLabel}>Ingresos</Text>
-          </View>
-        </View>
-      </View>
-    </View>
-  );
-}
+  // edición
+  const [editingId, setEditingId] = useState(null);
 
-export function CostsScreen({ navigation }) {
-  const [cursor, setCursor] = useState(new Date());
-  const [gastos, setGastos] = useState(DEFAULT_GASTOS);
+  const monthKey = getMonthKey(currentMonth);
 
-  const totalGastos =
-    gastos.alimentacion + gastos.medicamentos + gastos.mantenimiento + gastos.otros;
-
-  // Modales
-  const [showForm, setShowForm] = useState(false);
-  const [fAlim, setFAlim] = useState("");
-  const [fMeds, setFMeds] = useState("");
-  const [fMant, setFMant] = useState("");
-
-  const [showIncomeForm, setShowIncomeForm] = useState(false);
-  const [fIngreso, setFIngreso] = useState("");
-
-  // Nuevo: selector de mes/año
-  const [showMonthPicker, setShowMonthPicker] = useState(false);
-  const [pickerYear, setPickerYear] = useState(cursor.getFullYear());
-
-  /* ---------- Persistencia por mes ---------- */
-  const loadForMonth = async (date) => {
+  // ====== Cargar gastos del mes ======
+  const fetchExpenses = useCallback(async () => {
     try {
-      const raw = await AsyncStorage.getItem(monthKey(date));
-      if (raw) {
-        setGastos(JSON.parse(raw));
-      } else {
-        await AsyncStorage.setItem(monthKey(date), JSON.stringify(DEFAULT_GASTOS));
-        setGastos(DEFAULT_GASTOS);
-      }
-    } catch (e) {
-      console.warn("No se pudo cargar costos:", e);
-      setGastos(DEFAULT_GASTOS);
-    }
-  };
+      const u = auth.currentUser;
+      if (!u) return;
 
-  const saveForMonth = async (date, data) => {
-    try {
-      await AsyncStorage.setItem(monthKey(date), JSON.stringify(data));
+      const q = query(
+  collection(db, "costs"),
+  where("uid", "==", u.uid),
+  where("monthKey", "==", monthKey)
+);
+
+      const snap = await getDocs(q);
+      const arr = [];
+      snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+      // ordenar por fecha descendente en cliente (evita índice compuesto)
+      arr.sort((a, b) => {
+        const da = a.date?.toDate ? a.date.toDate() : new Date(a.date || 0);
+        const dbb = b.date?.toDate ? b.date.toDate() : new Date(b.date || 0);
+        return dbb - da;
+      });
+      setExpenses(arr);
     } catch (e) {
-      console.warn("No se pudo guardar costos:", e);
+      console.error("Error load expenses", e);
     }
-  };
+  }, [monthKey]);
 
   useEffect(() => {
-    loadForMonth(cursor);
-  }, [cursor]);
+    fetchExpenses();
+  }, [fetchExpenses]);
 
-  /* ---------- Acciones: gastos ---------- */
-  const openForm = () => {
-    setFAlim("");
-    setFMeds("");
-    setFMant("");
-    setShowForm(true);
-  };
+  // ====== Guardar (crear o actualizar) ======
+ const saveExpense = async () => {
+  const u = auth.currentUser;
+  if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
 
-  const saveForm = async () => {
-    const alim = parseFloat((fAlim || "0").replace(",", ".")) || 0;
-    const meds = parseFloat((fMeds || "0").replace(",", ".")) || 0;
-    const mant = parseFloat((fMant || "0").replace(",", ".")) || 0;
+  const amt = parseFloat(amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    return Alert.alert("Error", "Monto inválido.");
+  }
+  if (!CATEGORIES.includes(category)) {
+    return Alert.alert("Error", "Categoría inválida.");
+  }
 
-    if (alim < 0 || meds < 0 || mant < 0) {
-      Alert.alert("Datos inválidos", "Los valores no pueden ser negativos.");
-      return;
+  try {
+    if (editingId) {
+      // 👉 editar AHORA en la colección 'costs'
+      await updateDoc(doc(db, "costs", editingId), {
+        amount: amt,
+        category,
+        note: note.trim(),
+        updatedAt: serverTimestamp(),
+      });
+      Alert.alert("Actualizado", "Gasto editado correctamente.");
+    } else {
+      // 👉 crear en 'costs' asegurando uid, date y monthKey
+      await addDoc(collection(db, "costs"), {
+        uid: u.uid,
+        amount: amt,
+        category,
+        note: note.trim(),
+        date: new Date(),
+        monthKey,
+        createdAt: serverTimestamp(),
+        updatedAt: null,
+      });
+      Alert.alert("Guardado", "Gasto registrado.");
     }
 
-    const next = {
-      ...gastos,
-      alimentacion: gastos.alimentacion + alim,
-      medicamentos: gastos.medicamentos + meds,
-      mantenimiento: gastos.mantenimiento + mant,
-    };
+    // limpiar y refrescar
+    setAmount("");
+    setNote("");
+    setCategory("Alimentación");
+    setEditingId(null);
+    fetchExpenses();
+  } catch (e) {
+    console.error("saveExpense", e);
+    Alert.alert("Error", "No se pudo guardar el gasto.");
+  }
+};
 
-    setGastos(next);
-    await saveForMonth(cursor, next);
 
-    setShowForm(false);
-    Alert.alert("Guardado", "Gasto agregado y total actualizado ✅");
+  // ====== Eliminar ======
+  const deleteExpense = async (id) => {
+  const u = auth.currentUser;
+  if (!u) return;
+
+  Alert.alert("Eliminar", "¿Deseas eliminar este gasto?", [
+    { text: "Cancelar", style: "cancel" },
+    {
+      text: "Eliminar",
+      style: "destructive",
+      onPress: async () => {
+        try {
+          // 👉 eliminar AHORA en 'costs'
+          await deleteDoc(doc(db, "costs", id));
+
+          if (editingId === id) {
+            setEditingId(null);
+            setAmount("");
+            setNote("");
+            setCategory("Alimentación");
+          }
+          fetchExpenses();
+        } catch (e) {
+          console.error("deleteExpense", e);
+          Alert.alert("Error", "No se pudo eliminar el gasto.");
+        }
+      },
+    },
+  ]);
+};
+
+
+  // ====== Preparar edición ======
+  const startEdit = (item) => {
+    setEditingId(item.id);
+    setAmount(String(item.amount ?? ""));
+    setCategory(item.category || "Alimentación");
+    setNote(item.note || "");
   };
 
-  /* ---------- Acciones: ingresos ---------- */
-  const openIncomeForm = () => {
-    setFIngreso("");
-    setShowIncomeForm(true);
+  const cancelEdit = () => {
+    setEditingId(null);
+    setAmount("");
+    setNote("");
+    setCategory("Alimentación");
   };
 
-  const saveIncome = async () => {
-    const ingreso = parseFloat((fIngreso || "0").replace(",", ".")) || 0;
-    if (ingreso < 0) {
-      Alert.alert("Dato inválido", "El ingreso no puede ser negativo.");
-      return;
-    }
+  // ====== Cálculos ======
+  const { totals, totalGeneral } = useMemo(() => {
+    const t = { Alimentación: 0, Salud: 0, Mantenimiento: 0 };
+    let total = 0;
+    expenses.forEach((e) => {
+      if (t[e.category] !== undefined) {
+        t[e.category] += e.amount;
+        total += e.amount;
+      }
+    });
+    return { totals: t, totalGeneral: total };
+  }, [expenses]);
 
-    const next = {
-      ...gastos,
-      ingresos: gastos.ingresos + ingreso,
-    };
+  const validationOk =
+    Math.round(
+      totals["Alimentación"] + totals["Salud"] + totals["Mantenimiento"]
+    ) === Math.round(totalGeneral);
 
-    setGastos(next);
-    await saveForMonth(cursor, next);
-
-    setShowIncomeForm(false);
-    Alert.alert("Guardado", "Ingreso agregado ✅");
+  // ====== Cambio de mes ======
+  const prevMonth = () => {
+    const d = new Date(currentMonth);
+    d.setMonth(d.getMonth() - 1);
+    setCurrentMonth(d);
+  };
+  const nextMonth = () => {
+    const d = new Date(currentMonth);
+    d.setMonth(d.getMonth() + 1);
+    setCurrentMonth(d);
   };
 
-  /* ---------- Acciones: selector de mes ---------- */
-  const openMonthPicker = () => {
-    setPickerYear(cursor.getFullYear());
-    setShowMonthPicker(true);
-  };
-  const selectMonth = (monthIndex) => {
-    const d = new Date(pickerYear, monthIndex, 1);
-    setCursor(d);
-    setShowMonthPicker(false);
-  };
-
+  // ====== UI ======
   return (
-    <View style={{ flex: 1, backgroundColor: Colors.beige }}>
-      {/* Header como en el diseño */}
-      <View style={styles.greenTop}>
-        <View style={styles.headerRow}>
-          <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
-            <MaterialCommunityIcons name="arrow-left" color={Colors.white} size={22} />
-          </Pressable>
-          <Text style={styles.title}>Gestión de costos{"\n"}y gastos</Text>
-          <Pressable onPress={() => {}} hitSlop={10}>
-            <MaterialCommunityIcons name="magnify" color={Colors.white} size={22} />
-          </Pressable>
+    <ScrollView style={{ flex: 1, backgroundColor: Colors.beige }}>
+      {/* Header mes */}
+      <View style={styles.header}>
+        <TouchableOpacity onPress={prevMonth}>
+          <MaterialCommunityIcons name="chevron-left" size={28} color={Colors.white} />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>
+          {currentMonth.toLocaleString("es-ES", { month: "long", year: "numeric" })}
+        </Text>
+        <TouchableOpacity onPress={nextMonth}>
+          <MaterialCommunityIcons name="chevron-right" size={28} color={Colors.white} />
+        </TouchableOpacity>
+      </View>
+
+      {/* Formulario */}
+      <View style={styles.panel}>
+        <Text style={styles.panelTitle}>
+          {editingId ? "Editar gasto" : "Registrar gasto"}
+        </Text>
+
+        <TextInput
+          placeholder="Monto"
+          keyboardType="numeric"
+          value={amount}
+          onChangeText={setAmount}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Nota (opcional)"
+          value={note}
+          onChangeText={setNote}
+          style={styles.input}
+        />
+
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          {CATEGORIES.map((c) => (
+            <TouchableOpacity
+              key={c}
+              style={[styles.catBtn, category === c && { backgroundColor: Colors.green }]}
+              onPress={() => setCategory(c)}
+            >
+              <Text style={[styles.catText, category === c && { color: Colors.white }]}>
+                {c}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          <TouchableOpacity style={[styles.saveBtn, { flex: 1 }]} onPress={saveExpense}>
+            <MaterialCommunityIcons
+              name={editingId ? "content-save-edit" : "content-save"}
+              size={20}
+              color={Colors.white}
+            />
+            <Text style={styles.saveText}>{editingId ? "Guardar cambios" : "Guardar gasto"}</Text>
+          </TouchableOpacity>
+
+          {editingId ? (
+            <TouchableOpacity style={[styles.cancelBtn, { flex: 1 }]} onPress={cancelEdit}>
+              <MaterialCommunityIcons name="close-circle" size={20} color={Colors.bad} />
+              <Text style={[styles.saveText, { color: Colors.bad }]}>Cancelar</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       </View>
 
-      {/* Tarjeta */}
-      <View style={styles.card}>
-        {/* Selector de mes (abre modal de selección) */}
-        <Pressable onPress={openMonthPicker} style={styles.monthChip}>
-          <Text style={styles.monthText}>{monthLabel(cursor)}</Text>
-          <MaterialCommunityIcons name="chevron-down" size={18} color={Colors.text} />
-        </Pressable>
-
-        {/* Avatar */}
-        <View style={styles.avatarWrap}>
-          <MaterialCommunityIcons name="pig" size={66} color="#ef7896" />
+      {/* Reporte mensual */}
+      <View style={styles.panel}>
+        <Text style={styles.panelTitle}>Reporte mensual</Text>
+        {CATEGORIES.map((c) => (
+          <View key={c} style={styles.row}>
+            <Text style={styles.label}>{c}</Text>
+            <Text style={styles.value}>C$ {totals[c].toFixed(2)}</Text>
+          </View>
+        ))}
+        <View style={[styles.row, { borderTopWidth: 1, borderColor: Colors.border, paddingTop: 6 }]}>
+          <Text style={[styles.label, { fontWeight: "900" }]}>TOTAL</Text>
+          <Text style={[styles.value, { fontWeight: "900" }]}>C$ {totalGeneral.toFixed(2)}</Text>
         </View>
 
-        {/* Botones agregar */}
-        <Pressable
-          onPress={openForm}
-          style={({ pressed }) => [
-            styles.primaryBtn,
-            pressed && { backgroundColor: Colors.greenDark },
-          ]}
-        >
-          <MaterialCommunityIcons name="plus" size={18} color={Colors.white} />
-          <Text style={styles.primaryBtnText}>Agregar gasto</Text>
-        </Pressable>
-
-        <Pressable
-          onPress={openIncomeForm}
-          style={({ pressed }) => [styles.secondaryBtn, pressed && { opacity: 0.9 }]}
-        >
-          <MaterialCommunityIcons name="plus" size={18} color={Colors.green} />
-          <Text style={styles.secondaryBtnText}>Agregar ingreso</Text>
-        </Pressable>
-
-        {/* Tabla (con C$) */}
-        <View style={{ marginTop: 10 }}>
-          <Row label="Alimentación" value={gastos.alimentacion} money />
-          <Divider />
-          <Row label="Medicamentos" value={gastos.medicamentos} money />
-          <Divider />
-          <Row label="Mantenimiento" value={gastos.mantenimiento} money />
-          <Divider />
-          <Row label="Otros" value={gastos.otros} money />
-          <Divider />
-          <Row label="Total:" bold value={totalGastos} money />
-          <Row label="Ingresos:" bold value={gastos.ingresos} money />
+        <View style={{ marginTop: 10, flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <MaterialCommunityIcons
+            name={validationOk ? "check-circle" : "close-circle"}
+            size={20}
+            color={validationOk ? Colors.ok : Colors.bad}
+          />
+          <Text style={{ color: validationOk ? Colors.ok : Colors.bad, fontWeight: "700" }}>
+            {validationOk ? "Validación OK" : "Error en los cálculos"}
+          </Text>
         </View>
-
-        <MiniBars costos={totalGastos} ingresos={gastos.ingresos} />
       </View>
 
-      {/* ===== Modal: GASTOS ===== */}
-      <Modal visible={showForm} transparent animationType="slide" onRequestClose={() => setShowForm(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.modalWrap}>
-          <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={() => setShowForm(false)} />
-          <View style={styles.formCard}>
-            <Text style={styles.formTitle}>Agregar gasto</Text>
+      {/* Listado del mes */}
+      <View style={styles.panel}>
+        <Text style={styles.panelTitle}>Gastos del mes</Text>
+        {expenses.length === 0 ? (
+          <Text style={{ color: Colors.muted, fontWeight: "700" }}>No hay registros.</Text>
+        ) : (
+          expenses.map((it) => {
+            const d = it.date?.toDate ? it.date.toDate() : (it.date ? new Date(it.date) : null);
+            return (
+              <View key={it.id} style={styles.itemRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontWeight: "900", color: Colors.text }}>
+                    {it.category} · C$ {Number(it.amount).toFixed(2)}
+                  </Text>
+                  {!!it.note && (
+                    <Text style={{ color: Colors.muted, fontWeight: "700" }} numberOfLines={1}>
+                      {it.note}
+                    </Text>
+                  )}
+                  {d && (
+                    <Text style={{ color: Colors.muted, fontSize: 12 }}>
+                      {d.toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" })}
+                    </Text>
+                  )}
+                </View>
 
-            <Field label="Alimentación (C$)" value={fAlim} onChangeText={setFAlim} placeholder="0" />
-            <Field label="Medicamentos (C$)" value={fMeds} onChangeText={setFMeds} placeholder="0" />
-            <Field label="Mantenimiento (C$)" value={fMant} onChangeText={setFMant} placeholder="0" />
-
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
-              <Pressable onPress={() => setShowForm(false)} style={({ pressed }) => [styles.outlineBtn, pressed && { opacity: 0.9 }, { flex: 1 }]}>
-                <Text style={styles.outlineBtnText}>Cancelar</Text>
-              </Pressable>
-
-              <Pressable onPress={saveForm} style={({ pressed }) => [styles.primaryBtn, pressed && { backgroundColor: Colors.greenDark }, { flex: 1, justifyContent: "center" }]}>
-                <Text style={styles.primaryBtnText}>Guardar</Text>
-              </Pressable>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* ===== Modal: INGRESO ===== */}
-      <Modal visible={showIncomeForm} transparent animationType="slide" onRequestClose={() => setShowIncomeForm(false)}>
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.modalWrap}>
-          <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={() => setShowIncomeForm(false)} />
-          <View style={styles.formCard}>
-            <Text style={styles.formTitle}>Agregar ingreso</Text>
-
-            <Field label="Ingreso (C$)" value={fIngreso} onChangeText={setFIngreso} placeholder="0" />
-
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
-              <Pressable onPress={() => setShowIncomeForm(false)} style={({ pressed }) => [styles.outlineBtn, pressed && { opacity: 0.9 }, { flex: 1 }]}>
-                <Text style={styles.outlineBtnText}>Cancelar</Text>
-              </Pressable>
-
-              <Pressable onPress={saveIncome} style={({ pressed }) => [styles.primaryBtn, pressed && { backgroundColor: Colors.greenDark }, { flex: 1, justifyContent: "center" }]}>
-                <Text style={styles.primaryBtnText}>Guardar</Text>
-              </Pressable>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* ===== Modal: SELECTOR DE MES/AÑO ===== */}
-      <Modal visible={showMonthPicker} transparent animationType="fade" onRequestClose={() => setShowMonthPicker(false)}>
-        <View style={styles.monthPickerBackdrop}>
-          <View style={styles.monthPickerCard}>
-            <View style={styles.monthPickerHeader}>
-              <Pressable onPress={() => setPickerYear((y) => y - 1)} style={styles.yearBtn}>
-                <MaterialCommunityIcons name="chevron-left" size={22} color={Colors.green} />
-              </Pressable>
-              <Text style={styles.monthPickerTitle}>{pickerYear}</Text>
-              <Pressable onPress={() => setPickerYear((y) => y + 1)} style={styles.yearBtn}>
-                <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.green} />
-              </Pressable>
-            </View>
-
-            <View style={styles.monthGrid}>
-              {MONTHS_ES.map((m, idx) => {
-                const isSelected = pickerYear === cursor.getFullYear() && idx === cursor.getMonth();
-                return (
-                  <Pressable
-                    key={m}
-                    onPress={() => selectMonth(idx)}
-                    style={[
-                      styles.monthCell,
-                      isSelected && { backgroundColor: Colors.green },
-                    ]}
-                  >
-                    <Text style={[styles.monthCellText, isSelected && { color: Colors.white }]}>{m}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            <Pressable onPress={() => setShowMonthPicker(false)} style={[styles.outlineBtn, { marginTop: 8 }]}>
-              <Text style={styles.outlineBtnText}>Cerrar</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-    </View>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  <TouchableOpacity style={styles.iconBtn} onPress={() => startEdit(it)} accessibilityLabel="Editar">
+                    <MaterialCommunityIcons name="pencil" size={20} color={Colors.green} />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.iconBtn} onPress={() => deleteExpense(it.id)} accessibilityLabel="Eliminar">
+                    <MaterialCommunityIcons name="trash-can" size={20} color={Colors.bad} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })
+        )}
+      </View>
+    </ScrollView>
   );
 }
 
-/* ---------- Subcomponentes ---------- */
-function Row({ label, value, bold, money }) {
-  return (
-    <View style={styles.row}>
-      <Text style={[styles.rowLabel, bold && { fontWeight: "800" }]}>{label}</Text>
-      <Text style={[styles.rowValue, bold && { fontWeight: "900" }]}>
-        {money ? formatNIO(value) : value}
-      </Text>
-    </View>
-  );
-}
-function Divider() {
-  return <View style={{ height: 1, backgroundColor: "rgba(0,0,0,0.08)" }} />;
-}
-function Field({ label, value, onChangeText, placeholder }) {
-  return (
-    <View style={{ marginBottom: 10 }}>
-      <Text style={{ color: Colors.text, fontWeight: "700", marginBottom: 6 }}>{label}</Text>
-      <TextInput
-        value={value}
-        onChangeText={onChangeText}
-        keyboardType="numeric"
-        placeholder={placeholder}
-        placeholderTextColor="#9aa0a6"
-        style={styles.input}
-      />
-    </View>
-  );
-}
-
-/* ---------- Estilos ---------- */
+/* =======================
+   Estilos
+======================= */
 const styles = StyleSheet.create({
-  greenTop: {
-    backgroundColor: Colors.green,
-    paddingTop: 20,
-    paddingBottom: 36,
-    paddingHorizontal: 16,
-    borderBottomLeftRadius: 26,
-    borderBottomRightRadius: 26,
-  },
-  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  title: { color: Colors.white, fontWeight: "800", fontSize: 22, textAlign: "center", flex: 1 },
-
-  card: {
-    backgroundColor: Colors.beige,
-    marginHorizontal: 16,
-    marginTop: -24,
-    borderRadius: 24,
-    padding: 16,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-
-  monthChip: {
-    alignSelf: "flex-start",
-    backgroundColor: Colors.card,
-    borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  monthText: { color: Colors.text, fontWeight: "700" },
-
-  avatarWrap: {
-    alignSelf: "center",
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    backgroundColor: Colors.card,
-    marginTop: 12,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  primaryBtn: {
-    alignSelf: "center",
-    marginTop: 12,
-    backgroundColor: Colors.green,
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 18,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  primaryBtnText: { color: Colors.white, fontWeight: "800" },
-
-  secondaryBtn: {
-    alignSelf: "center",
-    marginTop: 8,
-    borderWidth: 2,
-    borderColor: Colors.green,
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 18,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: Colors.white,
-  },
-  secondaryBtnText: { color: Colors.green, fontWeight: "800" },
-
-  outlineBtn: {
-    borderWidth: 2,
-    borderColor: Colors.green,
-    borderRadius: 12,
-    paddingVertical: 10,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  outlineBtnText: { color: Colors.green, fontWeight: "800" },
-
-  row: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 8 },
-  rowLabel: { color: Colors.text, fontSize: 15, fontWeight: "600" },
-  rowValue: { color: Colors.text, fontSize: 15, fontWeight: "700" },
-
-  barLabel: { marginTop: 6, color: Colors.muted, fontSize: 13 },
-
-  /* Modal genérico */
-  modalWrap: { flex: 1, justifyContent: "flex-end" },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.25)" },
-  formCard: {
-    backgroundColor: Colors.white,
-    padding: 16,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-  },
-  formTitle: { fontSize: 18, fontWeight: "800", color: Colors.text, marginBottom: 10 },
-  input: {
-    backgroundColor: "#f2f4f7",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 16,
-    color: Colors.text,
-  },
-
-  /* Month picker */
-  monthPickerBackdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.25)",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
-  },
-  monthPickerCard: {
-    backgroundColor: Colors.white,
-    width: "100%",
-    borderRadius: 16,
-    padding: 14,
-  },
-  monthPickerHeader: {
+  header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 8,
+    backgroundColor: "#843a3a",
+    padding: 12,
   },
-  monthPickerTitle: { fontSize: 18, fontWeight: "800", color: Colors.green },
-  yearBtn: {
-    padding: 6,
-    borderRadius: 8,
-    backgroundColor: "#eef3ef",
-  },
-  monthGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
+  headerTitle: { color: Colors.white, fontWeight: "800", fontSize: 16 },
+
+  panel: {
+    backgroundColor: Colors.white,
+    margin: 12,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#843a3a",
     gap: 10,
   },
-  monthCell: {
-    width: "30%",
-    paddingVertical: 10,
+  panelTitle: { fontWeight: "900", fontSize: 15, color: Colors.text },
+
+  input: {
+    backgroundColor: Colors.white,
+    borderWidth: 1,
+    borderColor: Colors.border,
     borderRadius: 10,
-    backgroundColor: "#eef3ef",
+    padding: 10,
+    color: Colors.text,
+    fontWeight: "700",
+  },
+
+  catBtn: {
+    flex: 1,
+    padding: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.green,
     alignItems: "center",
   },
-  monthCellText: { fontWeight: "800", color: Colors.green },
+  catText: { fontWeight: "800", color: Colors.green },
+
+  saveBtn: {
+    marginTop: 6,
+    backgroundColor: Colors.green,
+    paddingVertical: 12,
+    borderRadius: 10,
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 6,
+  },
+  cancelBtn: {
+    marginTop: 6,
+    backgroundColor: Colors.white,
+    borderWidth: 1.5,
+    borderColor: Colors.bad,
+    paddingVertical: 12,
+    borderRadius: 10,
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 6,
+  },
+  saveText: { color: Colors.white, fontWeight: "900" },
+
+  row: { flexDirection: "row", justifyContent: "space-between" },
+  label: { fontWeight: "700", color: Colors.text },
+  value: { fontWeight: "700", color: Colors.text },
+
+  itemRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderColor: Colors.border,
+  },
+  iconBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: Colors.white,
+  },
 });
 
-export default CostsScreen;
+/* =====================================================================================
+   CONEXIÓN PARA RESPALDO / RESTAURACIÓN (usada desde BackupApp.js)
+   - getExpensesForBackup(uid): lee TODOS los gastos del productor (todas las fechas)
+   - restoreExpensesFromBackup(uid, items): inserta los gastos del respaldo
+===================================================================================== */
 
+// Lee todos los gastos del usuario (para armar el payload del respaldo)
+export async function getExpensesForBackup(uid) {
+  if (!uid) return [];
+  const out = [];
+  const q = query(collection(db, "producers", uid, "expenses"));
+  const snap = await getDocs(q);
+  snap.forEach((d) => {
+    const data = d.data();
+    // Serializamos fechas a ISO para que el backup sea 100% JSON
+    const dateISO =
+      data.date?.toDate ? data.date.toDate().toISOString() : (data.date || null);
+    out.push({
+      id: d.id,
+      amount: Number(data.amount || 0),
+      category: data.category || "Alimentación",
+      note: data.note || "",
+      monthKey: data.monthKey || (dateISO ? getMonthKey(new Date(dateISO)) : null),
+      date: dateISO,
+      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+      updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null,
+    });
+  });
+  return out;
+}
 
-
-
-
+// Inserta de vuelta los gastos desde un backup (no borra existentes)
+export async function restoreExpensesFromBackup(uid, items = []) {
+  if (!uid || !Array.isArray(items)) return;
+  for (const it of items) {
+    const date = it.date ? new Date(it.date) : new Date();
+    const mk = it.monthKey || getMonthKey(date);
+    await addDoc(collection(db, "producers", uid, "expenses"), {
+      amount: Number(it.amount || 0),
+      category: it.category || "Alimentación",
+      note: it.note || "",
+      date,
+      monthKey: mk,
+      // No restauramos createdAt/updatedAt originales para evitar errores de seguridad.
+      createdAt: serverTimestamp(),
+    });
+  }
+}

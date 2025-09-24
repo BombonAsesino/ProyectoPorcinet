@@ -14,7 +14,7 @@ const { width: W } = Dimensions.get("window");
 const scale = (n) => Math.round((W / 375) * n);
 
 const Colors = {
-  green: "#1E5B3F",
+  green: "#843a3a",
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
