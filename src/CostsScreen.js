@@ -27,23 +27,14 @@ import {
 
 /* ====== Estilos/colores ====== */
 const Colors = {
-<<<<<<< HEAD
-  green: "#1E5B3F",
-=======
   green: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
   muted: "#6b7280",
   border: "rgba(0,0,0,0.08)",
-<<<<<<< HEAD
-  ok: "#16a34a",
-  bad: "#dc2626",
-=======
   ok: "#843a3a",
   bad: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
 };
 
 
@@ -378,11 +369,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-<<<<<<< HEAD
-    backgroundColor: Colors.green,
-=======
     backgroundColor: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
     padding: 12,
   },
   headerTitle: { color: Colors.white, fontWeight: "800", fontSize: 16 },
@@ -393,11 +380,7 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 14,
     borderWidth: 1,
-<<<<<<< HEAD
-    borderColor: Colors.border,
-=======
     borderColor: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
     gap: 10,
   },
   panelTitle: { fontWeight: "900", fontSize: 15, color: Colors.text },

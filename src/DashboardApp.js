@@ -15,26 +15,16 @@ import { auth, realtimeDb } from "../database";
 import { ref, onValue, set, push, update } from "firebase/database";
 
 const Colors = {
-<<<<<<< HEAD
-  green: "#1E5B3F",
-=======
   green: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
   muted: "#6b7280",
   card: "#F1E9D6",
   border: "rgba(0,0,0,0.08)",
-<<<<<<< HEAD
-  ok: "#16a34a",
-  warn: "#eab308",
-  bad: "#dc2626",
-=======
   ok: "#843a3a",
   warn: "#eab308",
   bad: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
 };
 
 const MONTHS_ES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];

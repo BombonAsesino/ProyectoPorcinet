@@ -19,11 +19,7 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 import { updateProfile } from "firebase/auth";
 
 const Colors = {
-<<<<<<< HEAD
-  green: "#1E5B3F",
-=======
   green: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",

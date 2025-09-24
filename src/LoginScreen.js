@@ -18,21 +18,12 @@ import { signInWithEmailAndPassword } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 
 const Colors = {
-<<<<<<< HEAD
-  green: "#1E5B3F",
-  beige: "#FFF7EA",
-  text: "#0f172a",
-  white: "#FFFFFF",
-  muted: "#6b7280",
-  input: "#F6EFE0",
-=======
   green: "#843a3a",
   beige: "#FFF7EA",
   text: "black",
   white: "#FFFFFF",
   muted: "#6b7280",
   input: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   border: "rgba(0,0,0,0.12)",
 };
 
@@ -240,11 +231,7 @@ const styles = StyleSheet.create({
     borderRadius: 100,
     borderWidth: 6,
     borderColor: Colors.beige,
-<<<<<<< HEAD
-    backgroundColor: Colors.white,
-=======
     backgroundColor: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
     alignItems: "center",
     justifyContent: "center",
   },
@@ -254,11 +241,7 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.white,
     borderRadius: 12,
     borderWidth: 1.2,
-<<<<<<< HEAD
-    borderColor: "#D6D3C8",
-=======
     borderColor: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   },
   inputBoxError: { borderColor: "#EF4444", borderWidth: 2 },
   input: { paddingHorizontal: 12, paddingVertical: 12, color: Colors.text, fontWeight: "700" },
@@ -278,22 +261,12 @@ const styles = StyleSheet.create({
   primaryText: { color: Colors.white, fontWeight: "900", fontSize: 16 },
 
   secondaryBtn: {
-<<<<<<< HEAD
-    backgroundColor: "transparent",
-=======
     backgroundColor: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
     paddingVertical: 12,
     borderRadius: 10,
     alignItems: "center",
     borderWidth: 1.3,
-<<<<<<< HEAD
-    borderColor: "#2B5E42",
-  },
-  secondaryText: { color: Colors.text, fontWeight: "900", fontSize: 16 },
-=======
     borderColor: "white",
   },
   secondaryText: { color: "white", fontWeight: "900", fontSize: 16 },
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
 });

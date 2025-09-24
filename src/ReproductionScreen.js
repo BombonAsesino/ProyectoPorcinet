@@ -28,29 +28,17 @@ import {
 } from "firebase/firestore";
 
 const Colors = {
-<<<<<<< HEAD
-  green: "#1E5B3F",
-=======
   green:  "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
   muted: "#6b7280",
   card: "#FFFFFF",
-<<<<<<< HEAD
-  chip: "#d9fdd3",
-  border: "rgba(0,0,0,0.08)",
-  warn: "#f59e0b",
-  danger: "#ef4444",
-  ok: "#16a34a",
-=======
   chip: "#b93746ff",
   border: "rgba(0,0,0,0.08)",
   warn: "#f59e0b",
   danger: "#843a3a",
   ok: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
 };
 
 export default function ReproductionScreen() {
@@ -458,11 +446,7 @@ const styles = StyleSheet.create({
   actionText: { fontWeight: "800", color: Colors.text },
 
   deleteBtn: {
-<<<<<<< HEAD
-    backgroundColor: "#dc2626",
-=======
     backgroundColor: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
     paddingVertical: 12,
     borderRadius: 10,
     alignItems: "center",

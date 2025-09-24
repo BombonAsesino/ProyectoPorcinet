@@ -5,22 +5,14 @@ import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "../database";
 
 const Colors = {
-<<<<<<< HEAD
-  green: "#53a853ff",
-=======
   green: "#843a3a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
   muted: "#6b7280",
   card: "#F1E9D6",
   border: "rgba(0,0,0,0.08)",
-<<<<<<< HEAD
-  ok: "#b95656ff",
-=======
   ok: "#16a34a",
->>>>>>> ae21fe245a5a87233e75799906274cebdf755141
   bad: "#dc2626",
 };
 
