@@ -5,14 +5,14 @@ import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "../database";
 
 const Colors = {
-  green: "#1E5B3F",
+  green: "#53a853ff",
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
   muted: "#6b7280",
   card: "#F1E9D6",
   border: "rgba(0,0,0,0.08)",
-  ok: "#16a34a",
+  ok: "#b95656ff",
   bad: "#dc2626",
 };
 

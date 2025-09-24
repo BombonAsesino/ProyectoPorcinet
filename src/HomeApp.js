@@ -44,7 +44,7 @@ import BienvenidaProductor from "./BienvenidaProductor";
 import AdminDashboardScreen from "./AdminDashboardScreen"; // 🔹 NUEVO
 
 const Colors = {
-  green: "#1E5B3F",
+  green: "#b86969ff",
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
