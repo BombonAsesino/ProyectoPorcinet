@@ -24,10 +24,11 @@ import {
   setDoc,
   getDoc,
   writeBatch,
+  serverTimestamp,
 } from "firebase/firestore";
 
 const Colors = {
-  green: "#843a3a",
+  green: "#1E5B3F",
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
@@ -35,6 +36,19 @@ const Colors = {
   card: "#F1E9D6",
   border: "rgba(0,0,0,0.08)",
 };
+
+// ===== helpers de fecha =====
+function safeDate(any) {
+  if (!any) return new Date();
+  if (any?.toDate) return any.toDate();
+  if (any?.seconds != null) return new Date(any.seconds * 1000);
+  if (any?._seconds != null) return new Date(any._seconds * 1000);
+  if (typeof any === "string" || typeof any === "number") return new Date(any);
+  return new Date(any);
+}
+function monthKeyFrom(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
 
 function fmt(ts) {
   try {
@@ -46,72 +60,50 @@ function fmt(ts) {
 }
 
 /* ============================
-   Cargar datos a respaldar
-============================ */
-async function fetchCosts(uid) {
-  const out = [];
-  const q = query(
-    collection(db, "costs"),
-    where("uid", "==", uid),
-    orderBy("date", "desc")
-  );
-  const snap = await getDocs(q);
-  snap.forEach((d) => out.push({ id: d.id, ...d.data() }));
-  return out;
-}
-
-async function buildBackupPayload(uid) {
-  const costs = await fetchCosts(uid);
-  return {
-    version: 1,
-    uid,
-    createdAt: Date.now(),
-    data: { costs },
-  };
-}
-
-/* ============================
-   Respaldo en Firestore (no Storage)
+   Crear respaldo
 ============================ */
 async function createBackup(uid) {
-  // leer costos directamente aquí (con fallback si falta índice)
   let costs = [];
   try {
-    const q = query(
-      collection(db, "costs"),
-      where("uid", "==", uid),
-      orderBy("createdAt", "desc")
-    );
+    const q = query(collection(db, "costs"), where("uid", "==", uid));
     const snap = await getDocs(q);
     costs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  } catch {
-    const q2 = query(collection(db, "costs"), where("uid", "==", uid));
-    const snap2 = await getDocs(q2);
-    costs = snap2.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch (e) {
+    console.log("createBackup/getDocs error", e);
+    costs = [];
   }
+
+  const costsSanitized = costs.map((c) => ({
+    ...c,
+    date: (() => {
+      const d = safeDate(c.date);
+      return Number.isFinite(d?.getTime?.()) ? d.toISOString() : null;
+    })(),
+    createdAt: c.createdAt?.toMillis ? c.createdAt.toMillis() : null,
+    updatedAt: c.updatedAt?.toMillis ? c.updatedAt.toMillis() : null,
+  }));
 
   const payload = {
     version: 1,
     uid,
     createdAt: Date.now(),
-    data: { costs },
+    data: { costs: costsSanitized },
   };
 
   const json = JSON.stringify(payload);
-  const ts = payload.createdAt;
-  const backupId = `${uid}_${ts}`;
+  const backupId = `${uid}_${payload.createdAt}`;
   const ref = doc(collection(db, "backups"), backupId);
 
   await setDoc(ref, {
     uid,
-    createdAt: ts,
+    createdAt: payload.createdAt,
     sizeBytes: json.length,
     version: payload.version,
     collections: ["costs"],
-    payload: json, // guardamos el JSON como texto
+    payload: json,
   });
 
-  return { id: backupId, createdAt: ts };
+  return { id: backupId, createdAt: payload.createdAt };
 }
 
 async function readBackupDoc(backupId) {
@@ -125,21 +117,36 @@ async function readBackupDoc(backupId) {
 async function restoreCosts(uid, items = []) {
   if (!Array.isArray(items)) return;
   const batch = writeBatch(db);
+
   items.forEach((it) => {
-    const id = it.id ?? `${uid}_${it.date ?? Date.now()}`;
-    const { id: _omit, ...rest } = it;
-    batch.set(doc(collection(db, "costs"), id), { ...rest, uid });
+    const date = safeDate(it.date);
+    const mk = it.monthKey || monthKeyFrom(date);
+    const id = it.id ?? `${uid}_${date.getTime()}`;
+
+    const clean = {
+      uid,
+      amount: Number(it.amount || 0),
+      category: it.category || "Alimentación",
+      note: (it.note || "").trim(),
+      date,
+      monthKey: mk,
+      createdAt: serverTimestamp(),
+      updatedAt: null,
+    };
+
+    batch.set(doc(collection(db, "costs"), id), clean);
   });
+
   await batch.commit();
 }
 
 /* ============================
-   Pantalla principal (crear/restore)
+   Pantalla principal
 ============================ */
 export function BackupScreen({ navigation }) {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
-  const [last, setLast] = useState(null); // { id, createdAt, sizeBytes, ... }
+  const [last, setLast] = useState(null);
 
   useEffect(() => {
     const u = auth.currentUser;
@@ -186,12 +193,11 @@ export function BackupScreen({ navigation }) {
       setStatus("Descargando respaldo…");
       const payload = await readBackupDoc(last.id);
 
-      // Validación mínima
       if (!payload?.data || payload.uid !== u.uid) {
         throw new Error("Respaldo inválido o de otro usuario.");
       }
 
-      setStatus("Restaurando datos (costos) …");
+      setStatus("Restaurando datos …");
       await restoreCosts(u.uid, payload.data.costs ?? []);
       setStatus("Datos restaurados.");
       Alert.alert("Listo", "Se restauraron los costos del respaldo.");
@@ -250,7 +256,6 @@ export function BackupScreen({ navigation }) {
         ) : null}
       </View>
 
-      {/* Panel Historial con navegación */}
       <View style={styles.panel}>
         <Text style={styles.title}>Historial</Text>
         <Text style={styles.smallText}>
@@ -270,7 +275,7 @@ export function BackupScreen({ navigation }) {
 }
 
 /* ============================
-   Pantalla de historial
+   Pantalla historial
 ============================ */
 export function BackupHistoryScreen() {
   const [items, setItems] = useState([]);
@@ -368,7 +373,6 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   title: { fontSize: 16, fontWeight: "900", color: Colors.text, marginBottom: 8 },
-
   btn: {
     backgroundColor: Colors.green,
     borderRadius: 10,
@@ -380,7 +384,6 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   btnText: { color: Colors.white, fontWeight: "900" },
-
   btnLight: {
     marginTop: 8,
     backgroundColor: Colors.card,
@@ -395,10 +398,8 @@ const styles = StyleSheet.create({
     borderColor: Colors.border,
   },
   btnLightText: { color: Colors.green, fontWeight: "900" },
-
   smallLabel: { color: Colors.muted, fontWeight: "800", fontSize: 12 },
   smallText: { color: Colors.text, fontWeight: "700" },
-
   row: {
     backgroundColor: Colors.card,
     borderRadius: 12,
@@ -411,7 +412,6 @@ const styles = StyleSheet.create({
   },
   rowTitle: { fontWeight: "900", color: Colors.text },
   rowSub: { color: Colors.muted, fontWeight: "700", marginTop: 2 },
-
   rowBtn: {
     backgroundColor: Colors.green,
     borderRadius: 10,
