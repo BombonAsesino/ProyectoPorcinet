@@ -1,9 +1,12 @@
 // src/CostsScreen.js
+
+
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   View,
   Text,
   StyleSheet,
+  
   ScrollView,
   TextInput,
   TouchableOpacity,
@@ -23,59 +26,64 @@ import {
   deleteDoc,
 } from "firebase/firestore";
 
+/* ====== Estilos/colores ====== */
 const Colors = {
-  green: "#1E5B3F",
+  green: "#843a3a",
   beige: "#FFF7EA",
   text: "#0f172a",
   white: "#FFFFFF",
   muted: "#6b7280",
   border: "rgba(0,0,0,0.08)",
-  ok: "#16a34a",
-  bad: "#dc2626",
+  ok: "#843a3a",
+  bad: "#843a3a",
 };
 
+
+
+/* ====== Dominios ====== */
 const CATEGORIES = ["Alimentación", "Salud", "Mantenimiento"];
 
 function getMonthKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-// 🔹 convierte cualquier fecha en objeto Date válido
-function safeDate(any) {
-  if (!any) return null;
-  if (any?.toDate) return any.toDate();
-  if (any?.seconds != null) return new Date(any.seconds * 1000);
-  if (any?._seconds != null) return new Date(any._seconds * 1000);
-  if (typeof any === "string" || typeof any === "number") return new Date(any);
-  return new Date(any);
-}
-
+/* =====================================================================================
+   PANTALLA: Gestión de costos y gastos
+   - Crear/editar/eliminar gastos (Alimentación/Salud/Mantenimiento)
+   - Reporte mensual + validación de cálculos
+   - Carga por mes actual (con navegación de meses)
+===================================================================================== */
 export function CostsScreen() {
   const [expenses, setExpenses] = useState([]);
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Alimentación");
   const [note, setNote] = useState("");
   const [currentMonth, setCurrentMonth] = useState(new Date());
+
+  // edición
   const [editingId, setEditingId] = useState(null);
 
   const monthKey = getMonthKey(currentMonth);
 
-  // ===== Cargar gastos =====
+  // ====== Cargar gastos del mes ======
   const fetchExpenses = useCallback(async () => {
     try {
       const u = auth.currentUser;
       if (!u) return;
+
       const q = query(
-        collection(db, "costs"),
-        where("uid", "==", u.uid),
-        where("monthKey", "==", monthKey)
-      );
+  collection(db, "costs"),
+  where("uid", "==", u.uid),
+  where("monthKey", "==", monthKey)
+);
+
       const snap = await getDocs(q);
       const arr = [];
       snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+      // ordenar por fecha descendente en cliente (evita índice compuesto)
       arr.sort((a, b) => {
-        const da = safeDate(a.date) ?? new Date(0);
-        const dbb = safeDate(b.date) ?? new Date(0);
+        const da = a.date?.toDate ? a.date.toDate() : new Date(a.date || 0);
+        const dbb = b.date?.toDate ? b.date.toDate() : new Date(b.date || 0);
         return dbb - da;
       });
       setExpenses(arr);
@@ -88,79 +96,90 @@ export function CostsScreen() {
     fetchExpenses();
   }, [fetchExpenses]);
 
-  // ===== Guardar =====
-  const saveExpense = async () => {
-    const u = auth.currentUser;
-    if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
-    const amt = parseFloat(amount);
-    if (!Number.isFinite(amt) || amt <= 0) {
-      return Alert.alert("Error", "Monto inválido.");
-    }
-    if (!CATEGORIES.includes(category)) {
-      return Alert.alert("Error", "Categoría inválida.");
-    }
-    try {
-      if (editingId) {
-        await updateDoc(doc(db, "costs", editingId), {
-          amount: amt,
-          category,
-          note: note.trim(),
-          updatedAt: serverTimestamp(),
-        });
-        Alert.alert("Actualizado", "Gasto editado correctamente.");
-      } else {
-        await addDoc(collection(db, "costs"), {
-          uid: u.uid,
-          amount: amt,
-          category,
-          note: note.trim(),
-          date: new Date(),
-          monthKey,
-          createdAt: serverTimestamp(),
-          updatedAt: null,
-        });
-        Alert.alert("Guardado", "Gasto registrado.");
-      }
-      setAmount("");
-      setNote("");
-      setCategory("Alimentación");
-      setEditingId(null);
-      fetchExpenses();
-    } catch (e) {
-      console.error("saveExpense", e);
-      Alert.alert("Error", "No se pudo guardar el gasto.");
-    }
-  };
+  // ====== Guardar (crear o actualizar) ======
+ const saveExpense = async () => {
+  const u = auth.currentUser;
+  if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
 
-  // ===== Eliminar =====
+  const amt = parseFloat(amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    return Alert.alert("Error", "Monto inválido.");
+  }
+  if (!CATEGORIES.includes(category)) {
+    return Alert.alert("Error", "Categoría inválida.");
+  }
+
+  try {
+    if (editingId) {
+      // 👉 editar AHORA en la colección 'costs'
+      await updateDoc(doc(db, "costs", editingId), {
+        amount: amt,
+        category,
+        note: note.trim(),
+        updatedAt: serverTimestamp(),
+      });
+      Alert.alert("Actualizado", "Gasto editado correctamente.");
+    } else {
+      // 👉 crear en 'costs' asegurando uid, date y monthKey
+      await addDoc(collection(db, "costs"), {
+        uid: u.uid,
+        amount: amt,
+        category,
+        note: note.trim(),
+        date: new Date(),
+        monthKey,
+        createdAt: serverTimestamp(),
+        updatedAt: null,
+      });
+      Alert.alert("Guardado", "Gasto registrado.");
+    }
+
+    // limpiar y refrescar
+    setAmount("");
+    setNote("");
+    setCategory("Alimentación");
+    setEditingId(null);
+    fetchExpenses();
+  } catch (e) {
+    console.error("saveExpense", e);
+    Alert.alert("Error", "No se pudo guardar el gasto.");
+  }
+};
+
+
+  // ====== Eliminar ======
   const deleteExpense = async (id) => {
-    const u = auth.currentUser;
-    if (!u) return;
-    Alert.alert("Eliminar", "¿Deseas eliminar este gasto?", [
-      { text: "Cancelar", style: "cancel" },
-      {
-        text: "Eliminar",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            await deleteDoc(doc(db, "costs", id));
-            if (editingId === id) {
-              setEditingId(null);
-              setAmount("");
-              setNote("");
-              setCategory("Alimentación");
-            }
-            fetchExpenses();
-          } catch (e) {
-            console.error("deleteExpense", e);
-            Alert.alert("Error", "No se pudo eliminar el gasto.");
-          }
-        },
-      },
-    ]);
-  };
+  const u = auth.currentUser;
+  if (!u) return;
 
-  // ===== Preparar edición =====
+  Alert.alert("Eliminar", "¿Deseas eliminar este gasto?", [
+    { text: "Cancelar", style: "cancel" },
+    {
+      text: "Eliminar",
+      style: "destructive",
+      onPress: async () => {
+        try {
+          // 👉 eliminar AHORA en 'costs'
+          await deleteDoc(doc(db, "costs", id));
+
+          if (editingId === id) {
+            setEditingId(null);
+            setAmount("");
+            setNote("");
+            setCategory("Alimentación");
+          }
+          fetchExpenses();
+        } catch (e) {
+          console.error("deleteExpense", e);
+          Alert.alert("Error", "No se pudo eliminar el gasto.");
+        }
+      },
+    },
+  ]);
+};
+
+
+  // ====== Preparar edición ======
   const startEdit = (item) => {
     setEditingId(item.id);
     setAmount(String(item.amount ?? ""));
@@ -175,7 +194,7 @@ export function CostsScreen() {
     setCategory("Alimentación");
   };
 
-  // ===== Cálculos =====
+  // ====== Cálculos ======
   const { totals, totalGeneral } = useMemo(() => {
     const t = { Alimentación: 0, Salud: 0, Mantenimiento: 0 };
     let total = 0;
@@ -193,7 +212,7 @@ export function CostsScreen() {
       totals["Alimentación"] + totals["Salud"] + totals["Mantenimiento"]
     ) === Math.round(totalGeneral);
 
-  // ===== Cambio de mes =====
+  // ====== Cambio de mes ======
   const prevMonth = () => {
     const d = new Date(currentMonth);
     d.setMonth(d.getMonth() - 1);
@@ -205,7 +224,7 @@ export function CostsScreen() {
     setCurrentMonth(d);
   };
 
-  // ===== UI =====
+  // ====== UI ======
   return (
     <ScrollView style={{ flex: 1, backgroundColor: Colors.beige }}>
       {/* Header mes */}
@@ -300,14 +319,14 @@ export function CostsScreen() {
         </View>
       </View>
 
-      {/* Listado */}
+      {/* Listado del mes */}
       <View style={styles.panel}>
         <Text style={styles.panelTitle}>Gastos del mes</Text>
         {expenses.length === 0 ? (
           <Text style={{ color: Colors.muted, fontWeight: "700" }}>No hay registros.</Text>
         ) : (
           expenses.map((it) => {
-            const d = safeDate(it.date);
+            const d = it.date?.toDate ? it.date.toDate() : (it.date ? new Date(it.date) : null);
             return (
               <View key={it.id} style={styles.itemRow}>
                 <View style={{ flex: 1 }}>
@@ -327,10 +346,10 @@ export function CostsScreen() {
                 </View>
 
                 <View style={{ flexDirection: "row", gap: 8 }}>
-                  <TouchableOpacity style={styles.iconBtn} onPress={() => startEdit(it)}>
+                  <TouchableOpacity style={styles.iconBtn} onPress={() => startEdit(it)} accessibilityLabel="Editar">
                     <MaterialCommunityIcons name="pencil" size={20} color={Colors.green} />
                   </TouchableOpacity>
-                  <TouchableOpacity style={styles.iconBtn} onPress={() => deleteExpense(it.id)}>
+                  <TouchableOpacity style={styles.iconBtn} onPress={() => deleteExpense(it.id)} accessibilityLabel="Eliminar">
                     <MaterialCommunityIcons name="trash-can" size={20} color={Colors.bad} />
                   </TouchableOpacity>
                 </View>
@@ -343,13 +362,15 @@ export function CostsScreen() {
   );
 }
 
-/* ======================= Estilos ======================= */
+/* =======================
+   Estilos
+======================= */
 const styles = StyleSheet.create({
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: Colors.green,
+    backgroundColor: "#843a3a",
     padding: 12,
   },
   headerTitle: { color: Colors.white, fontWeight: "800", fontSize: 16 },
@@ -360,7 +381,7 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: Colors.border,
+    borderColor: "#843a3a",
     gap: 10,
   },
   panelTitle: { fontWeight: "900", fontSize: 15, color: Colors.text },
@@ -430,3 +451,52 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.white,
   },
 });
+
+/* =====================================================================================
+   CONEXIÓN PARA RESPALDO / RESTAURACIÓN (usada desde BackupApp.js)
+   - getExpensesForBackup(uid): lee TODOS los gastos del productor (todas las fechas)
+   - restoreExpensesFromBackup(uid, items): inserta los gastos del respaldo
+===================================================================================== */
+
+// Lee todos los gastos del usuario (para armar el payload del respaldo)
+export async function getExpensesForBackup(uid) {
+  if (!uid) return [];
+  const out = [];
+  const q = query(collection(db, "producers", uid, "expenses"));
+  const snap = await getDocs(q);
+  snap.forEach((d) => {
+    const data = d.data();
+    // Serializamos fechas a ISO para que el backup sea 100% JSON
+    const dateISO =
+      data.date?.toDate ? data.date.toDate().toISOString() : (data.date || null);
+    out.push({
+      id: d.id,
+      amount: Number(data.amount || 0),
+      category: data.category || "Alimentación",
+      note: data.note || "",
+      monthKey: data.monthKey || (dateISO ? getMonthKey(new Date(dateISO)) : null),
+      date: dateISO,
+      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+      updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null,
+    });
+  });
+  return out;
+}
+
+// Inserta de vuelta los gastos desde un backup (no borra existentes)
+export async function restoreExpensesFromBackup(uid, items = []) {
+  if (!uid || !Array.isArray(items)) return;
+  for (const it of items) {
+    const date = it.date ? new Date(it.date) : new Date();
+    const mk = it.monthKey || getMonthKey(date);
+    await addDoc(collection(db, "producers", uid, "expenses"), {
+      amount: Number(it.amount || 0),
+      category: it.category || "Alimentación",
+      note: it.note || "",
+      date,
+      monthKey: mk,
+      // No restauramos createdAt/updatedAt originales para evitar errores de seguridad.
+      createdAt: serverTimestamp(),
+    });
+  }
+}
