@@ -47,12 +47,6 @@ function getMonthKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-/* =====================================================================================
-   PANTALLA: Gestión de costos y gastos
-   - Crear/editar/eliminar gastos (Alimentación/Salud/Mantenimiento)
-   - Reporte mensual + validación de cálculos
-   - Carga por mes actual (con navegación de meses)
-===================================================================================== */
 export function CostsScreen() {
   const [expenses, setExpenses] = useState([]);
   const [amount, setAmount] = useState("");
@@ -452,11 +446,6 @@ const styles = StyleSheet.create({
   },
 });
 
-/* =====================================================================================
-   CONEXIÓN PARA RESPALDO / RESTAURACIÓN (usada desde BackupApp.js)
-   - getExpensesForBackup(uid): lee TODOS los gastos del productor (todas las fechas)
-   - restoreExpensesFromBackup(uid, items): inserta los gastos del respaldo
-===================================================================================== */
 
 // Lee todos los gastos del usuario (para armar el payload del respaldo)
 export async function getExpensesForBackup(uid) {
@@ -495,7 +484,6 @@ export async function restoreExpensesFromBackup(uid, items = []) {
       note: it.note || "",
       date,
       monthKey: mk,
-      // No restauramos createdAt/updatedAt originales para evitar errores de seguridad.
       createdAt: serverTimestamp(),
     });
   }

@@ -1,4 +1,4 @@
-// src/AssistantIAScreen.js
+
 import React, { useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput, ScrollView,
@@ -24,7 +24,7 @@ const Colors = {
 
 // ===== Razas (coeficientes + rangos típicos de finalización) =====
 // NOTA: Son valores de referencia (demo) para mejorar la estimación local.
-// Si conectas un modelo real/BD de tu granja, puedes ajustar aquí.
+// Si conectamos un modelo real/BD de la granja, se puede ajustar aquí.
 const BREED_INFO = {
   Yorkshire: { mult: 1.00, finisher: [250, 310] },
   Duroc:     { mult: 1.05, finisher: [260, 320] },
@@ -46,9 +46,7 @@ const guessBreedLocal = (uri) => {
   return BREEDS[s % BREEDS.length];
 };
 
-// ===== Peso base en libras (lb) =====
-// Fórmula correcta EN PULGADAS: weight_lb = (girth_in^2 * length_in) / 400
-// Convertimos cm -> pulgadas y calculamos directamente en lb.
+
 const baseWeightLb = (girthCm, lengthCm) => {
   const g = Number(girthCm), L = Number(lengthCm);
   if (!g || !L) return null;
@@ -62,11 +60,7 @@ const baseWeightLb = (girthCm, lengthCm) => {
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 
-// ===== Peso afinado por raza =====
-// 1) Calcula base en lb con pulgadas.
-// 2) Aplica multiplicador por raza.
-// 3) Reencuadre suave si está en finisher al rango típico de la raza.
-// 4) Clamps por etapa y tope absoluto 600 lb (límite superior).
+
 const breedAwareWeightLb = (breed, girthCm, lengthCm) => {
   const base = baseWeightLb(girthCm, lengthCm);
   if (base == null) return null;
@@ -105,9 +99,9 @@ const breedAwareWeightLb = (breed, girthCm, lengthCm) => {
 const measuresFromImageLocal = (uri) => {
   let h = 0; for (const c of uri) h = (h * 31 + c.charCodeAt(0)) % 100000;
   const map = (v, a, b) => a + (v % (b - a + 1));
-  // Perímetro torácico y longitud en CM en rangos razonables
-  const girth = map(h, 80, 115);       // cm (≈31.5"–45.3")
-  const length = map(h >> 3, 90, 135); // cm (≈35.4"–53.1")
+  
+  const girth = map(h, 80, 115);       
+  const length = map(h >> 3, 90, 135); 
   return { girth, length };
 };
 
