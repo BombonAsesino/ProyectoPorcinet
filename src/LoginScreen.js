@@ -141,7 +141,7 @@ export default function LoginScreen({ navigation }) {
             <Image
               source={require("../assets/logo.png")}
               resizeMode="cover"
-              style={{ width: "100%", height: "100%", borderRadius: 85 }}
+              style={{ width: "139%", height: "90%", borderRadius: 46 }}
             />
           </View>
         </View>
@@ -227,11 +227,11 @@ const styles = StyleSheet.create({
   avatarWrap: { alignItems: "center", marginTop: 8, marginBottom: 8 },
   pigIconCircle: {
     width: 200,
-    height: 200,
-    borderRadius: 100,
+    height: 250,
+    borderRadius: 50,
     borderWidth: 6,
     borderColor: Colors.beige,
-    backgroundColor: "#843a3a",
+    
     alignItems: "center",
     justifyContent: "center",
   },
