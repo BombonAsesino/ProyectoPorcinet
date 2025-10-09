@@ -67,7 +67,10 @@ export default function RegisterScreen({ navigation }) {
     }
 
     try {
+
       const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), pass);
+
+      
       const user = userCredential.user;
 
       const producerData = {

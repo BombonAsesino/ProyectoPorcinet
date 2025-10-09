@@ -32,6 +32,8 @@ import { ProductivityDashboardScreen } from "./DashboardApp";
 import { BackupScreen, BackupHistoryScreen } from "./BackupApp";
 import { CostsScreen } from "./CostsScreen";
 import ReproductionScreen from "./ReproductionScreen";
+import PigsListScreen from "./PigsListScreen";      // 🔹 NUEVO
+import PigFormScreen from "./PigFormScreen";        // 🔹 NUEVO
 import AssistantIAScreen from "./AssistantIAScreen";
 import AssistantIAWelcomeScreen from "./AssistantIAWelcomeScreen";
 import LoginScreen from "./LoginScreen";
@@ -41,7 +43,7 @@ import AuthWrapper from "./AuthWrapper";
 import SplashScreen from "./SplashScreen";
 import EditProfileScreen from "./EditProfileScreen";
 import BienvenidaProductor from "./BienvenidaProductor";
-import AdminDashboardScreen from "./AdminDashboardScreen"; // 🔹 NUEVO
+import AdminDashboardScreen from "./AdminDashboardScreen";
 
 const Colors = {
   green: "#843a3a",
@@ -171,8 +173,8 @@ function HomeMenu({ navigation }) {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: Colors.beige }}>
       <StatusBar barStyle="light-content" backgroundColor={Colors.green} />
-      <View style={[styles.screen, { backgroundColor: Colors.beige }]}>
-
+      {/* 🔹 Bajamos un poco el contenido */}
+      <View style={[styles.screen, { backgroundColor: Colors.beige, paddingTop: 20 }]}>
         {/* Franja superior */}
         <View style={styles.topGreen}>
           <View style={styles.rowChips}>
@@ -198,7 +200,7 @@ function HomeMenu({ navigation }) {
             <Text style={styles.tileText}>Respaldos{"\n"}en la nube</Text>
           </BouncyTile>
 
-          <BouncyTile onPress={() => navigation.navigate("Reproducción")}>
+          <BouncyTile onPress={() => navigation.navigate("ReproStack")}>
             <View style={styles.tileIconBox}>
               <Image source={require("../assets/cerdo.png")} resizeMode="cover" style={{ width: "110%", height: "100%", borderRadius: 12 }} />
             </View>
@@ -247,7 +249,7 @@ function HomeMenu({ navigation }) {
   );
 }
 
-/* ====== Tabs (contenido real, sin tocar tu lógica) ====== */
+/* ====== Tabs ====== */
 const Tab = createBottomTabNavigator();
 function AppTabs() {
   return (
@@ -314,16 +316,24 @@ function AppTabs() {
   );
 }
 
-/* ====== Stack interno que muestra Bienvenida -> Tabs ====== */
+/* ====== Stack Reproducción (H04) ====== */
+const ReproStackNav = createNativeStackNavigator();
+function ReproStack() {
+  return (
+    <ReproStackNav.Navigator>
+      <ReproStackNav.Screen name="Reproducción" component={ReproductionScreen} />
+      <ReproStackNav.Screen name="PigsList" component={PigsListScreen} options={{ title: "Lista de cerdas" }} />
+      <ReproStackNav.Screen name="PigForm" component={PigFormScreen} options={{ title: "Formulario cerda" }} />
+    </ReproStackNav.Navigator>
+  );
+}
+
+/* ====== Stack interno Bienvenida -> Tabs ====== */
 const InnerStack = createNativeStackNavigator();
-function TabsFlow({ navigation }) {
+function TabsFlow() {
   return (
     <InnerStack.Navigator>
-      <InnerStack.Screen
-        name="BienvenidaProductor"
-        component={BienvenidaProductor}
-        options={{ headerShown: false }}
-      />
+      <InnerStack.Screen name="BienvenidaProductor" component={BienvenidaProductor} options={{ headerShown: false }} />
       <InnerStack.Screen
         name="Tabs"
         component={AppTabs}
@@ -332,15 +342,8 @@ function TabsFlow({ navigation }) {
           title: "Mi Granja",
           headerStyle: { backgroundColor: Colors.green },
           headerTintColor: Colors.white,
-          headerTitleStyle: { fontWeight: "800", fontSize: 20 },
-          headerRight: () => (
-            <TouchableOpacity
-              onPress={() => Alert.alert("Buscar", "Función próximamente")}
-              style={{ paddingHorizontal: 6 }}
-            >
-              <MaterialCommunityIcons name="magnify" size={22} color={Colors.white} />
-            </TouchableOpacity>
-          ),
+          headerTitleStyle: { fontWeight: "800", fontSize: 22 },
+          headerTitleAlign: "center", // 🔹 centrado para más visibilidad
         }}
       />
     </InnerStack.Navigator>
@@ -349,54 +352,28 @@ function TabsFlow({ navigation }) {
 
 /* ====== Stack raíz ====== */
 const RootStack = createNativeStackNavigator();
-
 export default function HomeApp() {
   const theme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background: Colors.beige } };
 
   return (
     <NavigationContainer theme={theme}>
-      <RootStack.Navigator
-        screenOptions={{
-          headerStyle: { backgroundColor: Colors.green },
-          headerTintColor: Colors.white,
-          headerTitleStyle: { fontWeight: "800", fontSize: 20 },
-          headerTitleAlign: "left",
-          contentStyle: { backgroundColor: Colors.beige },
-        }}
-      >
-        {/* Splash primero */}
+      <RootStack.Navigator screenOptions={{ headerStyle: { backgroundColor: Colors.green }, headerTintColor: Colors.white }}>
         <RootStack.Screen name="Splash" component={SplashScreen} options={{ headerShown: false }} />
-
-        {/* Acceso */}
         <RootStack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
         <RootStack.Screen name="Registro" component={RegisterScreen} options={{ headerShown: false }} />
-
-        {/* Home con flujo: Bienvenida -> Tabs reales */}
-        <RootStack.Screen
-          name="Tabs"
-          component={TabsFlow}
-          options={{ headerShown: false }}
-        />
+        <RootStack.Screen name="Tabs" component={TabsFlow} options={{ headerShown: false }} />
 
         {/* Extras */}
         <RootStack.Screen name="Historial" component={BackupHistoryScreen} />
         <RootStack.Screen name="Costos" component={CostsScreen} />
-        <RootStack.Screen name="Reproducción" component={ReproductionScreen} />
+        <RootStack.Screen name="ReproStack" component={ReproStack} options={{ headerShown: false }} />
         <RootStack.Screen name="AsistenteIAWelcome" component={AssistantIAWelcomeScreen} />
         <RootStack.Screen name="AsistenteIA" component={AssistantIAScreen} />
         <RootStack.Screen name="EditarPerfil" component={EditProfileScreen} options={{ title: "Editar perfil" }} />
 
         {/* Admin */}
-        <RootStack.Screen
-          name="AdminPanel"
-          component={AdminHomeScreen}
-          options={{ title: "Admin", headerShown: true }}
-        />
-        <RootStack.Screen
-          name="AdminDashboard"
-          component={AdminDashboardScreen}   // 🔹 NUEVO
-          options={{ title: "Dashboard" }}
-        />
+        <RootStack.Screen name="AdminPanel" component={AdminHomeScreen} options={{ title: "Admin" }} />
+        <RootStack.Screen name="AdminDashboard" component={AdminDashboardScreen} options={{ title: "Dashboard" }} />
       </RootStack.Navigator>
     </NavigationContainer>
   );
@@ -405,7 +382,6 @@ export default function HomeApp() {
 /* ====== Estilos ====== */
 const styles = StyleSheet.create({
   screen: { flex: 1, padding: 16, paddingBottom: 100 },
-
   topGreen: {
     marginHorizontal: -16,
     marginTop: 0,
@@ -414,7 +390,6 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     paddingBottom: 14,
   },
-
   rowChips: { flexDirection: "row", alignItems: "stretch", gap: 12 },
   chip: {
     flex: 1,
@@ -427,7 +402,6 @@ const styles = StyleSheet.create({
   },
   chipTitle: { fontSize: 12, color: Colors.muted, fontWeight: "700" },
   chipValue: { fontSize: 18, fontWeight: "900", color: Colors.text, marginTop: 4 },
-
   grid: { marginTop: 12, flexDirection: "row", gap: 12, flexWrap: "wrap" },
   tile: {
     width: "48%",
@@ -437,61 +411,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.08)",
   },
-  tileIconBox: {
-    height: 90,
-    borderRadius: 12,
-    backgroundColor: Colors.white,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 8,
-    overflow: "hidden",
-  },
+  tileIconBox: { height: 90, borderRadius: 12, backgroundColor: Colors.white, alignItems: "center", justifyContent: "center", marginBottom: 8, overflow: "hidden" },
   tileText: { fontWeight: "800", color: Colors.text, fontSize: 14, lineHeight: 18 },
-
-  aiBtn: {
-    marginTop: 14,
-    backgroundColor: Colors.green,
-    paddingVertical: 12,
-    borderRadius: 14,
-    alignItems: "center",
-  },
+  aiBtn: { marginTop: 14, backgroundColor: Colors.green, paddingVertical: 12, borderRadius: 14, alignItems: "center" },
   aiBtnText: { color: Colors.white, fontWeight: "800", fontSize: 16 },
-
-  // Modal editar madres
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.35)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-  modalCard: {
-    width: "100%",
-    maxWidth: 420,
-    backgroundColor: Colors.white,
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.08)",
-  },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 20 },
+  modalCard: { width: "100%", maxWidth: 420, backgroundColor: Colors.white, borderRadius: 14, padding: 16, borderWidth: 1, borderColor: "rgba(0,0,0,0.08)" },
   modalTitle: { fontSize: 16, fontWeight: "800", color: Colors.text, marginBottom: 10 },
-  modalInput: {
-    borderWidth: 1,
-    borderColor: "#D6D3C8",
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    fontWeight: "800",
-    color: Colors.text,
-  },
+  modalInput: { borderWidth: 1, borderColor: "#D6D3C8", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, fontWeight: "800", color: Colors.text },
   modalRow: { flexDirection: "row", gap: 12, marginTop: 12, justifyContent: "flex-end" },
-  modalBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-    borderRadius: 10,
-    borderWidth: 2,
-    borderColor: Colors.green,
-  },
+  modalBtn: { paddingVertical: 12, paddingHorizontal: 18, borderRadius: 10, borderWidth: 2, borderColor: Colors.green },
   modalCancel: { backgroundColor: Colors.white },
   modalOk: { backgroundColor: Colors.green, borderColor: Colors.green },
   modalBtnText: { fontWeight: "900", fontSize: 14 },

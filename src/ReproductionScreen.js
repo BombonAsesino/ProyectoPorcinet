@@ -25,6 +25,7 @@ import {
   where,
   writeBatch,
   setDoc,
+  updateDoc, // ← agregado para editar eventos
 } from "firebase/firestore";
 
 const Colors = {
@@ -41,24 +42,40 @@ const Colors = {
   ok: "#843a3a",
 };
 
-export default function ReproductionScreen() {
+export default function ReproductionScreen({ navigation, route }) {
   const today = new Date().toISOString().slice(0, 10);
   const [selected, setSelected] = useState(today);
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // ====== Carga en tiempo real de eventos del usuario (sin orderBy para evitar índice) ======
+  // ===== NUEVO: cerda seleccionada (H04) =====
+  const [selectedSow, setSelectedSow] = useState(null); // { id, earTag, name }
+
+  useEffect(() => {
+    const sow = route?.params?.pickedSow;
+    if (sow?.id) setSelectedSow(sow);
+  }, [route?.params?.pickedSow]);
+
+  // ====== Carga en tiempo real de eventos del usuario ======
   useEffect(() => {
     const uid = auth.currentUser?.uid || "__anon__";
-    const q = query(collection(db, "reproEvents"), where("uid", "==", uid));
+
+    let qBase = query(collection(db, "reproEvents"), where("uid", "==", uid));
+
+    if (selectedSow?.id) {
+      qBase = query(
+        collection(db, "reproEvents"),
+        where("uid", "==", uid),
+        where("sowId", "==", selectedSow.id)
+      );
+    }
 
     const unsub = onSnapshot(
-      q,
+      qBase,
       (snap) => {
         const list = [];
         snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
 
-        // Orden solo en cliente por timestamp desc
         list.sort((a, b) => {
           const ta = a.ts?.toMillis?.() ?? (a.ts?.seconds ? a.ts.seconds * 1000 : 0);
           const tb = b.ts?.toMillis?.() ?? (b.ts?.seconds ? b.ts.seconds * 1000 : 0);
@@ -75,7 +92,7 @@ export default function ReproductionScreen() {
       }
     );
     return unsub;
-  }, []);
+  }, [selectedSow?.id]);
 
   const dayEvents = useMemo(() => events.filter((e) => e.date === selected), [events, selected]);
 
@@ -103,10 +120,18 @@ export default function ReproductionScreen() {
         const uid = auth.currentUser?.uid || "__anon__";
         if (!selected) return Alert.alert("Selecciona una fecha", "Toca un día en el calendario.");
 
+        if (!selectedSow?.id) {
+          return Alert.alert(
+            "Selecciona una cerda",
+            "Abre la lista de cerdas y elige una antes de registrar eventos."
+          );
+        }
+
         await addDoc(collection(db, "reproEvents"), {
           uid,
-          date: selected, // YYYY-MM-DD
-          type, // "celo" | "monta" | "parto"
+          sowId: selectedSow.id,
+          date: selected,          // YYYY-MM-DD
+          type,                    // "celo" | "monta" | "parto"
           note: "",
           ts: serverTimestamp(),
         });
@@ -117,7 +142,7 @@ export default function ReproductionScreen() {
         Alert.alert("Error", "No se pudo registrar el evento.");
       }
     },
-    [selected]
+    [selected, selectedSow?.id]
   );
 
   const deleteLastOfSelected = useCallback(async () => {
@@ -138,6 +163,57 @@ export default function ReproductionScreen() {
     }
   }, [dayEvents]);
 
+  // ====== CRUD en cronología (EDIT / DELETE por ítem) ======
+  const editEvent = async (event) => {
+    // Alert.prompt solo está en iOS; en Android usa un modal tuyo si quieres.
+    Alert.prompt(
+      "Editar evento",
+      "Escribe una nota (opcional) para este evento.",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Guardar",
+          onPress: async (value) => {
+            try {
+              await updateDoc(doc(db, "reproEvents", event.id), {
+                note: value || "",
+              });
+              Alert.alert("Actualizado", "Evento editado con éxito.");
+            } catch (err) {
+              console.error("editEvent:", err);
+              Alert.alert("Error", "No se pudo editar el evento.");
+            }
+          },
+        },
+      ],
+      "plain-text",
+      event.note || ""
+    );
+  };
+
+  const deleteEvent = async (event) => {
+    Alert.alert(
+      "Eliminar evento",
+      "¿Seguro que quieres borrar este evento?",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteDoc(doc(db, "reproEvents", event.id));
+              Alert.alert("Eliminado", "Evento borrado.");
+            } catch (err) {
+              console.error("deleteEvent:", err);
+              Alert.alert("Error", "No se pudo borrar el evento.");
+            }
+          },
+        },
+      ]
+    );
+  };
+
   // ====== Fechas helpers ======
   const parseYMD = (ymd) => {
     const [y, m, d] = ymd.split("-").map((n) => parseInt(n, 10));
@@ -154,7 +230,6 @@ export default function ReproductionScreen() {
   };
 
   // ====== Generación de alertas (cliente) ======
-  // Devolvemos un arreglo con { key, level, kind, refDate, title, msg }
   const computedAlerts = useMemo(() => {
     if (!events.length) return [];
 
@@ -231,22 +306,19 @@ export default function ReproductionScreen() {
         const uid = auth.currentUser?.uid;
         if (!uid) return;
 
-        // Leer las alertas actuales del usuario
         const q = query(collection(db, "reproAlerts"), where("uid", "==", uid));
         const snap = await getDocs(q);
-        const existing = new Map(); // key -> {id, data}
+        const existing = new Map();
         snap.forEach((d) => {
           const data = d.data();
           if (data.key) existing.set(data.key, { id: d.id, data });
         });
 
-        // Map de las nuevas (por key)
         const desired = new Map();
         computedAlerts.forEach((a) => desired.set(a.key, a));
 
         const batch = writeBatch(db);
 
-        // Upsert de las que faltan o cambiaron
         for (const [key, a] of desired.entries()) {
           const safeId = `${uid}_${key}`.replace(/[^a-zA-Z0-9_\-\.|]/g, "_");
           const docRef = doc(db, "reproAlerts", safeId);
@@ -263,7 +335,6 @@ export default function ReproductionScreen() {
             createdAt: serverTimestamp(),
           };
 
-          // Si no existe o cambió algo importante, merge
           if (
             !prev ||
             prev.level !== payload.level ||
@@ -274,7 +345,6 @@ export default function ReproductionScreen() {
           }
         }
 
-        // Borrar las que existen en Firestore pero ya no aplican
         for (const [key, { id }] of existing.entries()) {
           if (!desired.has(key)) {
             batch.delete(doc(db, "reproAlerts", id));
@@ -284,7 +354,6 @@ export default function ReproductionScreen() {
         await batch.commit();
       } catch (e) {
         console.error("syncAlerts:", e);
-        // No interrumpimos la UI si falla; solo registramos el error
       }
     };
 
@@ -299,6 +368,34 @@ export default function ReproductionScreen() {
       showsVerticalScrollIndicator
     >
       <Text style={styles.title}>Control de reproducción</Text>
+
+      {/* Selector de cerda */}
+      <View style={styles.sowBar}>
+        <TouchableOpacity
+          style={styles.sowBtn}
+          onPress={() =>
+            navigation?.navigate("PigsList", {
+              selectMode: true,
+              onPick: (sow) => setSelectedSow(sow),
+            })
+          }
+        >
+          <MaterialCommunityIcons name="account-search" size={18} color={Colors.white} />
+          <Text style={styles.sowBtnText}>
+            {selectedSow
+              ? `Cerda: ${selectedSow.earTag ? "#" + selectedSow.earTag : selectedSow.name || selectedSow.id}`
+              : "Seleccionar cerda"}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.sowAdd}
+          onPress={() => navigation?.navigate("PigForm")}
+        >
+          <MaterialCommunityIcons name="plus" size={18} color={Colors.green} />
+          <Text style={styles.sowAddText}>Nueva</Text>
+        </TouchableOpacity>
+      </View>
 
       <Calendar
         onDayPress={(day) => setSelected(day.dateString)}
@@ -342,7 +439,7 @@ export default function ReproductionScreen() {
         <Text style={styles.deleteText}>Borrar último registro del día</Text>
       </TouchableOpacity>
 
-      {/* Cronología */}
+      {/* Cronología con CRUD */}
       <View style={styles.timeline}>
         <Text style={styles.timelineTitle}>Cronología ({selected})</Text>
 
@@ -353,26 +450,38 @@ export default function ReproductionScreen() {
         ) : (
           dayEvents.map((e) => (
             <View key={e.id} style={styles.timelineRow}>
-              <MaterialCommunityIcons
-                name={
-                  e.type === "celo"
-                    ? "heart-outline"
-                    : e.type === "monta"
-                    ? "horse-human"
-                    : "baby-face-outline"
-                }
-                size={18}
-                color={Colors.green}
-              />
-              <Text style={styles.timelineText}>
-                {e.type === "celo" ? "Detección de celo" : e.type === "monta" ? "Monta" : "Parto"}
-              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1 }}>
+                <MaterialCommunityIcons
+                  name={
+                    e.type === "celo"
+                      ? "heart-outline"
+                      : e.type === "monta"
+                      ? "horse-human"
+                      : "baby-face-outline"
+                  }
+                  size={18}
+                  color={Colors.green}
+                />
+                <Text style={styles.timelineText}>
+                  {e.type === "celo" ? "Detección de celo" : e.type === "monta" ? "Monta" : "Parto"}
+                  {e.note ? ` · ${e.note}` : ""}
+                </Text>
+              </View>
+
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <TouchableOpacity onPress={() => editEvent(e)} accessibilityLabel="Editar evento">
+                  <MaterialCommunityIcons name="pencil" size={18} color={Colors.green} />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => deleteEvent(e)} accessibilityLabel="Eliminar evento">
+                  <MaterialCommunityIcons name="delete" size={18} color={Colors.danger} />
+                </TouchableOpacity>
+              </View>
             </View>
           ))
         )}
       </View>
 
-      {/* Alertas (las calculadas; también quedaron persistidas) */}
+      {/* Alertas */}
       <View style={styles.alertsPanel}>
         <Text style={styles.alertsTitle}>Alertas</Text>
         {computedAlerts.length === 0 ? (
@@ -409,6 +518,38 @@ export default function ReproductionScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f5f5dc", padding: 15 },
   title: { fontSize: 22, fontWeight: "bold", color: "green", marginBottom: 15 },
+
+  // barra de selección de cerda
+  sowBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+    gap: 8,
+  },
+  sowBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: Colors.green,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+  },
+  sowBtnText: { color: Colors.white, fontWeight: "900" },
+  sowAdd: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: Colors.card,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  sowAddText: { color: Colors.green, fontWeight: "900" },
 
   eventCard: {
     flexDirection: "row",
@@ -466,8 +607,14 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   timelineTitle: { fontWeight: "bold", marginBottom: 8, color: Colors.text },
-  timelineRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 6 },
-  timelineText: { fontWeight: "700", color: Colors.text },
+  timelineRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 6,
+    justifyContent: "space-between",
+  },
+  timelineText: { fontWeight: "700", color: Colors.text, flex: 1 },
 
   alertsPanel: {
     backgroundColor: Colors.card,

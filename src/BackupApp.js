@@ -157,8 +157,11 @@ export function BackupScreen({ navigation }) {
       where("uid", "==", u.uid),
       orderBy("createdAt", "desc")
     );
+   
     const off = onSnapshot(qHist, (snap) => {
       const arr = [];
+
+      
       snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
       setLast(arr[0] ?? null);
     });
