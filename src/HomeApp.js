@@ -16,7 +16,7 @@ import {
   Platform,
   Animated,
   Image,
-  DeviceEventEmitter, // ⬅️ nuevo: escuchar sincronización inmediata
+  DeviceEventEmitter,
 } from "react-native";
 import { NavigationContainer, DefaultTheme, useIsFocused } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -24,9 +24,11 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-// RTDB
-import { auth, realtimeDb } from "../database";
+// Firebase
+import { auth, realtimeDb, db } from "../database";
 import { ref, onValue, update } from "firebase/database";
+import { doc, getDoc } from "firebase/firestore";
+import { signOut as fbSignOut } from "firebase/auth";
 
 // Screens
 import { ProductivityDashboardScreen } from "./DashboardApp";
@@ -45,6 +47,8 @@ import SplashScreen from "./SplashScreen";
 import EditProfileScreen from "./EditProfileScreen";
 import BienvenidaProductor from "./BienvenidaProductor";
 import AdminDashboardScreen from "./AdminDashboardScreen";
+import PantallaGestionUsuarios from "./PantallaGestionUsuarios";
+import ManageUsersLite from "./ManageUsersLite";
 
 const Colors = {
   green: "#843a3a",
@@ -67,12 +71,8 @@ function StatChip({ title, value, onPress }) {
         pressed && { opacity: 0.9, transform: [{ scale: 0.99 }] },
       ]}
     >
-      <Text style={styles.chipTitle} numberOfLines={1}>
-        {title}
-      </Text>
-      <Text style={styles.chipValue} numberOfLines={1}>
-        {value}
-      </Text>
+      <Text style={styles.chipTitle} numberOfLines={1}>{title}</Text>
+      <Text style={styles.chipValue} numberOfLines={1}>{value}</Text>
     </Pressable>
   );
 }
@@ -107,9 +107,54 @@ function HomeMenu({ navigation }) {
   const [productivityPct, setProductivityPct] = useState(null);
   const isFocused = useIsFocused();
 
+  // === permisos / rol ===
+  const [role, setRole] = useState("principal"); // 'principal' | 'subcuenta'
+  const [allowed, setAllowed] = useState(null);  // null => sin restricción (dueño); array => módulos permitidos
+
   // Modal madres
   const [editSowsVisible, setEditSowsVisible] = useState(false);
   const [tempSows, setTempSows] = useState("");
+
+  // 0) Cargar rol + permisos (NO toca tu lógica existente)
+  useEffect(() => {
+    const u = auth.currentUser;
+    if (!u) return;
+    let offRTDB = null;
+
+    (async () => {
+      try {
+        const me = await getDoc(doc(db, "users", u.uid));
+        const data = me.data() || {};
+        const rol = data?.rol || "principal";
+        const disabled = !!data?.disabled;
+        setRole(rol);
+
+        if (disabled) {
+          Alert.alert("Cuenta desactivada", "Consulta con el administrador.");
+          try { await fbSignOut(auth); } catch {}
+          return;
+        }
+
+        if (rol === "subcuenta") {
+          offRTDB = onValue(ref(realtimeDb, `userPerms/${u.uid}/modules`), (snap) => {
+            const arr = snap.val();
+            setAllowed(Array.isArray(arr) ? arr.map(String) : []);
+          });
+        } else {
+          setAllowed(null); // dueño: todo permitido
+        }
+      } catch {
+        setAllowed(null);
+      }
+    })();
+
+    return () => { if (offRTDB) offRTDB(); };
+  }, []);
+
+  const can = (tag) => {
+    if (allowed === null) return true;     // dueño
+    return allowed.includes(tag);          // subcuenta limitada
+  };
 
   // 1) Prime desde AsyncStorage para arranque rápido
   useEffect(() => {
@@ -142,7 +187,6 @@ function HomeMenu({ navigation }) {
       const msows = Number(v.sows ?? 0);
       setHerd(total);
       setSows(msows);
-      // espejo local
       try {
         await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: total, sows: msows }));
       } catch {}
@@ -161,16 +205,13 @@ function HomeMenu({ navigation }) {
     const pRef = ref(realtimeDb, `producers/${u.uid}/metrics/productivityPct`);
     const off = onValue(pRef, (snap) => {
       const v = snap.val();
-      if (Number.isFinite(v)) {
-        setProductivityPct(Math.max(0, Math.min(100, Math.round(v))));
-      } else {
-        setProductivityPct(null);
-      }
+      if (Number.isFinite(v)) setProductivityPct(Math.max(0, Math.min(100, Math.round(v))));
+      else setProductivityPct(null);
     });
     return () => off();
   }, [isFocused]);
 
-  // 4) 🔔 Sincronización inmediata desde Dashboard (sin esperar RTDB ni foco)
+  // 4) Broadcast inmediato desde Dashboard
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener("herd:updated", async (payload) => {
       if (!payload) return;
@@ -178,9 +219,7 @@ function HomeMenu({ navigation }) {
       const s = Number(payload.sows ?? sows);
       setHerd(Number.isFinite(t) ? t : herd);
       setSows(Number.isFinite(s) ? s : sows);
-      try {
-        await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: t, sows: s }));
-      } catch {}
+      try { await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: t, sows: s })); } catch {}
     });
     return () => sub.remove();
   }, [herd, sows]);
@@ -190,7 +229,7 @@ function HomeMenu({ navigation }) {
     setEditSowsVisible(true);
   };
 
-  // Guardar "Madres" desde Home (por si editas desde aquí) -> RTDB + espejo
+  // Guardar "Madres" desde Home (opcional)
   const saveSows = async () => {
     const newVal = parseInt(String(tempSows).trim(), 10);
     if (!Number.isFinite(newVal) || newVal < 0) {
@@ -207,13 +246,12 @@ function HomeMenu({ navigation }) {
         sows: newVal,
         updatedAt: Date.now(),
       });
-      // espejo local + broadcast para otras pantallas
       await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: herd, sows: newVal }));
       setSows(newVal);
       DeviceEventEmitter.emit("herd:updated", { total: herd, sows: newVal });
       setEditSowsVisible(false);
       Alert.alert("Guardado", "Número de madres actualizado.");
-    } catch (e) {
+    } catch {
       Alert.alert("Error", "No se pudo guardar el valor.");
     }
   };
@@ -221,81 +259,80 @@ function HomeMenu({ navigation }) {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: Colors.beige }}>
       <StatusBar barStyle="light-content" backgroundColor={Colors.green} />
-      {/* 🔹 Bajamos un poco el contenido */}
       <View style={[styles.screen, { backgroundColor: Colors.beige, paddingTop: 20 }]}>
         {/* Franja superior */}
         <View style={styles.topGreen}>
           <View style={styles.rowChips}>
             <StatChip title="Cerdos totales" value={String(herd)} />
-            <StatChip title="Productividad" value={`${productivityPct ?? 85}%`} />
+           <StatChip
+  title="Productividad"
+  value={productivityPct !== null && productivityPct !== undefined
+    ? `${productivityPct}%`
+    : `-- %`
+  }
+/>
+
             <StatChip title="Madres" value={String(sows)} onPress={openEditSows} />
           </View>
         </View>
 
-        {/* Grid */}
+        {/* Grid (filtrado por permisos) */}
         <View style={styles.grid}>
-          <BouncyTile onPress={() => navigation.navigate("InformeTab")}>
-            <View style={styles.tileIconBox}>
-              <Image
-                source={require("../assets/productividad.png")}
-                resizeMode="cover"
-                style={{ width: "100%", height: "101%", borderRadius: 12 }}
-              />
-            </View>
-            <Text style={styles.tileText}>Dashboard de{"\n"}productividad</Text>
-          </BouncyTile>
+          {can("analytics") && (
+            <BouncyTile onPress={() => navigation.navigate("InformeTab")}>
+              <View style={styles.tileIconBox}>
+                <Image source={require("../assets/productividad.png")} resizeMode="cover" style={{ width: "100%", height: "101%", borderRadius: 12 }} />
+              </View>
+              <Text style={styles.tileText}>Dashboard de{"\n"}productividad</Text>
+            </BouncyTile>
+          )}
 
-          <BouncyTile onPress={() => navigation.navigate("RespaldoTab")}>
-            <View style={styles.tileIconBox}>
-              <Image
-                source={require("../assets/respaldo.png")}
-                resizeMode="cover"
-                style={{ width: "100%", height: "109%", borderRadius: 10 }}
-              />
-            </View>
-            <Text style={styles.tileText}>Respaldos{"\n"}en la nube</Text>
-          </BouncyTile>
+          {can("respaldo") && (
+            <BouncyTile onPress={() => navigation.navigate("RespaldoTab")}>
+              <View style={styles.tileIconBox}>
+                <Image source={require("../assets/respaldo.png")} resizeMode="cover" style={{ width: "100%", height: "109%", borderRadius: 10 }} />
+              </View>
+              <Text style={styles.tileText}>Respaldos{"\n"}en la nube</Text>
+            </BouncyTile>
+          )}
 
-          <BouncyTile onPress={() => navigation.navigate("ReproStack")}>
-            <View style={styles.tileIconBox}>
-              <Image
-                source={require("../assets/cerdo.png")}
-                resizeMode="cover"
-                style={{ width: "110%", height: "100%", borderRadius: 12 }}
-              />
-            </View>
-            <Text style={styles.tileText}>Control de{"\n"}reproducción</Text>
-          </BouncyTile>
+          {can("reproduccion") && (
+            <BouncyTile onPress={() => navigation.navigate("ReproStack")}>
+              <View style={styles.tileIconBox}>
+                <Image source={require("../assets/cerdo.png")} resizeMode="cover" style={{ width: "110%", height: "100%", borderRadius: 12 }} />
+              </View>
+              <Text style={styles.tileText}>Control de{"\n"}reproducción</Text>
+            </BouncyTile>
+          )}
 
-          <BouncyTile onPress={() => navigation.navigate("Costos")}>
-            <View style={styles.tileIconBox}>
-              <Image
-                source={require("../assets/costos.png")}
-                resizeMode="cover"
-                style={{ width: "101%", height: "101%", borderRadius: 12 }}
-              />
-            </View>
-            <Text style={styles.tileText}>Gestión de{"\n"}costos y gastos</Text>
-          </BouncyTile>
+          {role === "principal" && (
+            <BouncyTile onPress={() => navigation.navigate("GestionUsuarios")}>
+              <View style={styles.tileIconBox}>
+                <MaterialCommunityIcons name="account-group-outline" size={42} color={Colors.green} />
+              </View>
+              <Text style={styles.tileText}>Gestión de{"\n"}usuarios</Text>
+            </BouncyTile>
+          )}
+
+          {can("costos") && (
+            <BouncyTile onPress={() => navigation.navigate("Costos")}>
+              <View style={styles.tileIconBox}>
+                <Image source={require("../assets/costos.png")} resizeMode="cover" style={{ width: "101%", height: "101%", borderRadius: 12 }} />
+              </View>
+              <Text style={styles.tileText}>Gestión de{"\n"}costos y gastos</Text>
+            </BouncyTile>
+          )}
         </View>
 
-        {/* Botón IA */}
+        {/* Botón IA (si quieres limitarlo, cambia a can('analytics')) */}
         <Pressable style={styles.aiBtn} onPress={() => navigation.navigate("AsistenteIAWelcome")}>
           <Text style={styles.aiBtnText}>Asistente IA</Text>
         </Pressable>
       </View>
 
       {/* Modal editar “Madres” */}
-      <Modal
-        transparent
-        visible={editSowsVisible}
-        animationType="fade"
-        onRequestClose={() => setEditSowsVisible(false)}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalBackdrop}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
+      <Modal transparent visible={editSowsVisible} animationType="fade" onRequestClose={() => setEditSowsVisible(false)}>
+        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Editar número de madres</Text>
             <TextInput
@@ -307,10 +344,7 @@ function HomeMenu({ navigation }) {
               maxLength={6}
             />
             <View style={styles.modalRow}>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalCancel]}
-                onPress={() => setEditSowsVisible(false)}
-              >
+              <TouchableOpacity style={[styles.modalBtn, styles.modalCancel]} onPress={() => setEditSowsVisible(false)}>
                 <Text style={[styles.modalBtnText, { color: Colors.green }]}>Cancelar</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.modalBtn, styles.modalOk]} onPress={saveSows}>
@@ -327,6 +361,42 @@ function HomeMenu({ navigation }) {
 /* ====== Tabs ====== */
 const Tab = createBottomTabNavigator();
 function AppTabs() {
+  // pequeña capa de permisos también en Tabs
+  const [role, setRole] = useState("principal");
+  const [allowed, setAllowed] = useState(null);
+
+  useEffect(() => {
+    const u = auth.currentUser;
+    if (!u) return;
+    let offRTDB = null;
+
+    (async () => {
+      try {
+        const me = await getDoc(doc(db, "users", u.uid));
+        const data = me.data() || {};
+        const rol = data?.rol || "principal";
+        setRole(rol);
+        if (rol === "subcuenta") {
+          offRTDB = onValue(ref(realtimeDb, `userPerms/${u.uid}/modules`), (snap) => {
+            const arr = snap.val();
+            setAllowed(Array.isArray(arr) ? arr.map(String) : []);
+          });
+        } else {
+          setAllowed(null);
+        }
+      } catch {
+        setAllowed(null);
+      }
+    })();
+
+    return () => { if (offRTDB) offRTDB(); };
+  }, []);
+
+  const can = (tag) => {
+    if (allowed === null) return true;
+    return allowed.includes(tag);
+  };
+
   return (
     <AuthWrapper>
       <Tab.Navigator
@@ -364,26 +434,33 @@ function AppTabs() {
             ),
           }}
         />
-        <Tab.Screen
-          name="InformeTab"
-          component={ProductivityDashboardScreen}
-          options={{
-            title: "Informe",
-            tabBarIcon: ({ color, size }) => (
-              <MaterialCommunityIcons name="chart-bar" size={size} color={color} />
-            ),
-          }}
-        />
-        <Tab.Screen
-          name="RespaldoTab"
-          component={BackupScreen}
-          options={{
-            title: "Respaldo",
-            tabBarIcon: ({ color, size }) => (
-              <MaterialCommunityIcons name="cloud-outline" size={size} color={color} />
-            ),
-          }}
-        />
+
+        {can("analytics") && (
+          <Tab.Screen
+            name="InformeTab"
+            component={ProductivityDashboardScreen}
+            options={{
+              title: "Informe",
+              tabBarIcon: ({ color, size }) => (
+                <MaterialCommunityIcons name="chart-bar" size={size} color={color} />
+              ),
+            }}
+          />
+        )}
+
+        {can("respaldo") && (
+          <Tab.Screen
+            name="RespaldoTab"
+            component={BackupScreen}
+            options={{
+              title: "Respaldo",
+              tabBarIcon: ({ color, size }) => (
+                <MaterialCommunityIcons name="cloud-outline" size={size} color={color} />
+              ),
+            }}
+          />
+        )}
+
         <Tab.Screen
           name="PerfilTab"
           component={ProfileScreen}
@@ -405,16 +482,8 @@ function ReproStack() {
   return (
     <ReproStackNav.Navigator>
       <ReproStackNav.Screen name="Reproducción" component={ReproductionScreen} />
-      <ReproStackNav.Screen
-        name="PigsList"
-        component={PigsListScreen}
-        options={{ title: "Lista de cerdas" }}
-      />
-      <ReproStackNav.Screen
-        name="PigForm"
-        component={PigFormScreen}
-        options={{ title: "Formulario cerda" }}
-      />
+      <ReproStackNav.Screen name="PigsList" component={PigsListScreen} options={{ title: "Lista de cerdas" }} />
+      <ReproStackNav.Screen name="PigForm" component={PigFormScreen} options={{ title: "Formulario cerda" }} />
     </ReproStackNav.Navigator>
   );
 }
@@ -424,11 +493,7 @@ const InnerStack = createNativeStackNavigator();
 function TabsFlow() {
   return (
     <InnerStack.Navigator>
-      <InnerStack.Screen
-        name="BienvenidaProductor"
-        component={BienvenidaProductor}
-        options={{ headerShown: false }}
-      />
+      <InnerStack.Screen name="BienvenidaProductor" component={BienvenidaProductor} options={{ headerShown: false }} />
       <InnerStack.Screen
         name="Tabs"
         component={AppTabs}
@@ -459,6 +524,12 @@ export default function HomeApp() {
         <RootStack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
         <RootStack.Screen name="Registro" component={RegisterScreen} options={{ headerShown: false }} />
         <RootStack.Screen name="Tabs" component={TabsFlow} options={{ headerShown: false }} />
+
+        <RootStack.Screen
+          name="GestionUsuarios"
+          component={PantallaGestionUsuarios}
+          options={{ title: "Gestión de usuarios" }}
+        />
 
         {/* Extras */}
         <RootStack.Screen name="Historial" component={BackupHistoryScreen} />
@@ -518,40 +589,12 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   tileText: { fontWeight: "800", color: Colors.text, fontSize: 14, lineHeight: 18 },
-  aiBtn: {
-    marginTop: 14,
-    backgroundColor: Colors.green,
-    paddingVertical: 12,
-    borderRadius: 14,
-    alignItems: "center",
-  },
+  aiBtn: { marginTop: 14, backgroundColor: Colors.green, paddingVertical: 12, borderRadius: 14, alignItems: "center" },
   aiBtnText: { color: Colors.white, fontWeight: "800", fontSize: 16 },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.35)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-  modalCard: {
-    width: "100%",
-    maxWidth: 420,
-    backgroundColor: Colors.white,
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: "rgba(0,0,0,0.08)",
-  },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 20 },
+  modalCard: { width: "100%", maxWidth: 420, backgroundColor: Colors.white, borderRadius: 14, padding: 16, borderWidth: 1, borderColor: "rgba(0,0,0,0.08)" },
   modalTitle: { fontSize: 16, fontWeight: "800", color: Colors.text, marginBottom: 10 },
-  modalInput: {
-    borderWidth: 1,
-    borderColor: "#D6D3C8",
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    fontWeight: "800",
-    color: Colors.text,
-  },
+  modalInput: { borderWidth: 1, borderColor: "#D6D3C8", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, fontWeight: "800", color: Colors.text },
   modalRow: { flexDirection: "row", gap: 12, marginTop: 12, justifyContent: "flex-end" },
   modalBtn: { paddingVertical: 12, paddingHorizontal: 18, borderRadius: 10, borderWidth: 2, borderColor: Colors.green },
   modalCancel: { backgroundColor: Colors.white },

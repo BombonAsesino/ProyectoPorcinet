@@ -17,6 +17,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth, db } from "../database";
 import { createUserWithEmailAndPassword } from "firebase/auth";
 import { doc, setDoc } from "firebase/firestore";
+import { linkSubaccountLite } from "./utils/linkSubaccountLite";
 
 const Colors = {
   green: "#843a3a",
@@ -84,6 +85,10 @@ export default function RegisterScreen({ navigation }) {
         createdAt: new Date(),
         updatedAt: new Date(),
       };
+
+await createUserWithEmailAndPassword(auth, email, pass);
+await linkSubaccountLite();
+
 
       await setDoc(doc(db, "producers", user.uid), producerData);
 
