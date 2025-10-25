@@ -16,6 +16,7 @@ import {
   Platform,
   Animated,
   Image,
+  DeviceEventEmitter, // ⬅️ nuevo: escuchar sincronización inmediata
 } from "react-native";
 import { NavigationContainer, DefaultTheme, useIsFocused } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -25,15 +26,15 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // RTDB
 import { auth, realtimeDb } from "../database";
-import { ref, onValue } from "firebase/database";
+import { ref, onValue, update } from "firebase/database";
 
 // Screens
 import { ProductivityDashboardScreen } from "./DashboardApp";
 import { BackupScreen, BackupHistoryScreen } from "./BackupApp";
 import { CostsScreen } from "./CostsScreen";
 import ReproductionScreen from "./ReproductionScreen";
-import PigsListScreen from "./PigsListScreen";      // 🔹 NUEVO
-import PigFormScreen from "./PigFormScreen";        // 🔹 NUEVO
+import PigsListScreen from "./PigsListScreen";
+import PigFormScreen from "./PigFormScreen";
 import AssistantIAScreen from "./AssistantIAScreen";
 import AssistantIAWelcomeScreen from "./AssistantIAWelcomeScreen";
 import LoginScreen from "./LoginScreen";
@@ -101,7 +102,7 @@ function BouncyTile({ onPress, children }) {
 
 /* ====== Menú de Inicio ====== */
 function HomeMenu({ navigation }) {
-  const [herd, setHerd] = useState(0);
+  const [herd, setHerd] = useState(0); // total
   const [sows, setSows] = useState(0);
   const [productivityPct, setProductivityPct] = useState(null);
   const isFocused = useIsFocused();
@@ -110,27 +111,46 @@ function HomeMenu({ navigation }) {
   const [editSowsVisible, setEditSowsVisible] = useState(false);
   const [tempSows, setTempSows] = useState("");
 
+  // 1) Prime desde AsyncStorage para arranque rápido
   useEffect(() => {
-    const loadStats = async () => {
+    const primeFromLocal = async () => {
       try {
         const raw = await AsyncStorage.getItem(STATS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
-          setHerd(Number.isFinite(obj?.herdSize) ? obj.herdSize : 0);
-          setSows(Number.isFinite(obj?.sows) ? obj.sows : 0);
-        } else {
-          setHerd(0);
-          setSows(0);
+          if (Number.isFinite(obj?.herdSize)) setHerd(obj.herdSize);
+          if (Number.isFinite(obj?.sows)) setSows(obj.sows);
         }
-      } catch {
-        setHerd(0);
-        setSows(0);
-      }
+      } catch {}
     };
-    if (isFocused) loadStats();
+    if (isFocused) primeFromLocal();
   }, [isFocused]);
 
-  // Productividad RTDB
+  // 2) Suscripción RTDB: herd (total, sows)
+  useEffect(() => {
+    if (!isFocused) return;
+    const u = auth.currentUser;
+    if (!u) {
+      setHerd(0);
+      setSows(0);
+      return;
+    }
+    const herdRef = ref(realtimeDb, `producers/${u.uid}/herd`);
+    const off = onValue(herdRef, async (snap) => {
+      const v = snap.val() || {};
+      const total = Number(v.total ?? 0);
+      const msows = Number(v.sows ?? 0);
+      setHerd(total);
+      setSows(msows);
+      // espejo local
+      try {
+        await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: total, sows: msows }));
+      } catch {}
+    });
+    return () => off();
+  }, [isFocused]);
+
+  // 3) Productividad RTDB
   useEffect(() => {
     if (!isFocused) return;
     const u = auth.currentUser;
@@ -150,21 +170,49 @@ function HomeMenu({ navigation }) {
     return () => off();
   }, [isFocused]);
 
+  // 4) 🔔 Sincronización inmediata desde Dashboard (sin esperar RTDB ni foco)
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener("herd:updated", async (payload) => {
+      if (!payload) return;
+      const t = Number(payload.total ?? herd);
+      const s = Number(payload.sows ?? sows);
+      setHerd(Number.isFinite(t) ? t : herd);
+      setSows(Number.isFinite(s) ? s : sows);
+      try {
+        await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: t, sows: s }));
+      } catch {}
+    });
+    return () => sub.remove();
+  }, [herd, sows]);
+
   const openEditSows = () => {
     setTempSows(String(sows ?? 0));
     setEditSowsVisible(true);
   };
+
+  // Guardar "Madres" desde Home (por si editas desde aquí) -> RTDB + espejo
   const saveSows = async () => {
     const newVal = parseInt(String(tempSows).trim(), 10);
     if (!Number.isFinite(newVal) || newVal < 0) {
       Alert.alert("Valor inválido", "Ingresa un número válido (0 o mayor).");
       return;
     }
+    const u = auth.currentUser;
+    if (!u) {
+      Alert.alert("Sesión", "Debes iniciar sesión.");
+      return;
+    }
     try {
-      const payload = { herdSize: herd, sows: newVal };
-      await AsyncStorage.setItem(STATS_KEY, JSON.stringify(payload));
+      await update(ref(realtimeDb, `producers/${u.uid}/herd`), {
+        sows: newVal,
+        updatedAt: Date.now(),
+      });
+      // espejo local + broadcast para otras pantallas
+      await AsyncStorage.setItem(STATS_KEY, JSON.stringify({ herdSize: herd, sows: newVal }));
       setSows(newVal);
+      DeviceEventEmitter.emit("herd:updated", { total: herd, sows: newVal });
       setEditSowsVisible(false);
+      Alert.alert("Guardado", "Número de madres actualizado.");
     } catch (e) {
       Alert.alert("Error", "No se pudo guardar el valor.");
     }
@@ -188,28 +236,44 @@ function HomeMenu({ navigation }) {
         <View style={styles.grid}>
           <BouncyTile onPress={() => navigation.navigate("InformeTab")}>
             <View style={styles.tileIconBox}>
-              <Image source={require("../assets/productividad.png")} resizeMode="cover" style={{ width: "100%", height: "101%", borderRadius: 12 }} />
+              <Image
+                source={require("../assets/productividad.png")}
+                resizeMode="cover"
+                style={{ width: "100%", height: "101%", borderRadius: 12 }}
+              />
             </View>
             <Text style={styles.tileText}>Dashboard de{"\n"}productividad</Text>
           </BouncyTile>
 
           <BouncyTile onPress={() => navigation.navigate("RespaldoTab")}>
             <View style={styles.tileIconBox}>
-              <Image source={require("../assets/respaldo.png")} resizeMode="cover" style={{ width: "100%", height: "109%", borderRadius: 10 }} />
+              <Image
+                source={require("../assets/respaldo.png")}
+                resizeMode="cover"
+                style={{ width: "100%", height: "109%", borderRadius: 10 }}
+              />
             </View>
             <Text style={styles.tileText}>Respaldos{"\n"}en la nube</Text>
           </BouncyTile>
 
           <BouncyTile onPress={() => navigation.navigate("ReproStack")}>
             <View style={styles.tileIconBox}>
-              <Image source={require("../assets/cerdo.png")} resizeMode="cover" style={{ width: "110%", height: "100%", borderRadius: 12 }} />
+              <Image
+                source={require("../assets/cerdo.png")}
+                resizeMode="cover"
+                style={{ width: "110%", height: "100%", borderRadius: 12 }}
+              />
             </View>
             <Text style={styles.tileText}>Control de{"\n"}reproducción</Text>
           </BouncyTile>
 
           <BouncyTile onPress={() => navigation.navigate("Costos")}>
             <View style={styles.tileIconBox}>
-              <Image source={require("../assets/costos.png")} resizeMode="cover" style={{ width: "101%", height: "101%", borderRadius: 12 }} />
+              <Image
+                source={require("../assets/costos.png")}
+                resizeMode="cover"
+                style={{ width: "101%", height: "101%", borderRadius: 12 }}
+              />
             </View>
             <Text style={styles.tileText}>Gestión de{"\n"}costos y gastos</Text>
           </BouncyTile>
@@ -222,8 +286,16 @@ function HomeMenu({ navigation }) {
       </View>
 
       {/* Modal editar “Madres” */}
-      <Modal transparent visible={editSowsVisible} animationType="fade" onRequestClose={() => setEditSowsVisible(false)}>
-        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <Modal
+        transparent
+        visible={editSowsVisible}
+        animationType="fade"
+        onRequestClose={() => setEditSowsVisible(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalBackdrop}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Editar número de madres</Text>
             <TextInput
@@ -235,7 +307,10 @@ function HomeMenu({ navigation }) {
               maxLength={6}
             />
             <View style={styles.modalRow}>
-              <TouchableOpacity style={[styles.modalBtn, styles.modalCancel]} onPress={() => setEditSowsVisible(false)}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalCancel]}
+                onPress={() => setEditSowsVisible(false)}
+              >
                 <Text style={[styles.modalBtnText, { color: Colors.green }]}>Cancelar</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.modalBtn, styles.modalOk]} onPress={saveSows}>
@@ -284,7 +359,9 @@ function AppTabs() {
           component={HomeMenu}
           options={{
             title: "Inicio",
-            tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="home-outline" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => (
+              <MaterialCommunityIcons name="home-outline" size={size} color={color} />
+            ),
           }}
         />
         <Tab.Screen
@@ -292,7 +369,9 @@ function AppTabs() {
           component={ProductivityDashboardScreen}
           options={{
             title: "Informe",
-            tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="chart-bar" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => (
+              <MaterialCommunityIcons name="chart-bar" size={size} color={color} />
+            ),
           }}
         />
         <Tab.Screen
@@ -300,7 +379,9 @@ function AppTabs() {
           component={BackupScreen}
           options={{
             title: "Respaldo",
-            tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="cloud-outline" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => (
+              <MaterialCommunityIcons name="cloud-outline" size={size} color={color} />
+            ),
           }}
         />
         <Tab.Screen
@@ -308,7 +389,9 @@ function AppTabs() {
           component={ProfileScreen}
           options={{
             title: "Perfil",
-            tabBarIcon: ({ color, size }) => <MaterialCommunityIcons name="account-outline" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => (
+              <MaterialCommunityIcons name="account-outline" size={size} color={color} />
+            ),
           }}
         />
       </Tab.Navigator>
@@ -322,8 +405,16 @@ function ReproStack() {
   return (
     <ReproStackNav.Navigator>
       <ReproStackNav.Screen name="Reproducción" component={ReproductionScreen} />
-      <ReproStackNav.Screen name="PigsList" component={PigsListScreen} options={{ title: "Lista de cerdas" }} />
-      <ReproStackNav.Screen name="PigForm" component={PigFormScreen} options={{ title: "Formulario cerda" }} />
+      <ReproStackNav.Screen
+        name="PigsList"
+        component={PigsListScreen}
+        options={{ title: "Lista de cerdas" }}
+      />
+      <ReproStackNav.Screen
+        name="PigForm"
+        component={PigFormScreen}
+        options={{ title: "Formulario cerda" }}
+      />
     </ReproStackNav.Navigator>
   );
 }
@@ -333,7 +424,11 @@ const InnerStack = createNativeStackNavigator();
 function TabsFlow() {
   return (
     <InnerStack.Navigator>
-      <InnerStack.Screen name="BienvenidaProductor" component={BienvenidaProductor} options={{ headerShown: false }} />
+      <InnerStack.Screen
+        name="BienvenidaProductor"
+        component={BienvenidaProductor}
+        options={{ headerShown: false }}
+      />
       <InnerStack.Screen
         name="Tabs"
         component={AppTabs}
@@ -343,7 +438,7 @@ function TabsFlow() {
           headerStyle: { backgroundColor: Colors.green },
           headerTintColor: Colors.white,
           headerTitleStyle: { fontWeight: "800", fontSize: 22 },
-          headerTitleAlign: "center", // 🔹 centrado para más visibilidad
+          headerTitleAlign: "center",
         }}
       />
     </InnerStack.Navigator>
@@ -357,7 +452,9 @@ export default function HomeApp() {
 
   return (
     <NavigationContainer theme={theme}>
-      <RootStack.Navigator screenOptions={{ headerStyle: { backgroundColor: Colors.green }, headerTintColor: Colors.white }}>
+      <RootStack.Navigator
+        screenOptions={{ headerStyle: { backgroundColor: Colors.green }, headerTintColor: Colors.white }}
+      >
         <RootStack.Screen name="Splash" component={SplashScreen} options={{ headerShown: false }} />
         <RootStack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
         <RootStack.Screen name="Registro" component={RegisterScreen} options={{ headerShown: false }} />
@@ -411,14 +508,50 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.08)",
   },
-  tileIconBox: { height: 90, borderRadius: 12, backgroundColor: Colors.white, alignItems: "center", justifyContent: "center", marginBottom: 8, overflow: "hidden" },
+  tileIconBox: {
+    height: 90,
+    borderRadius: 12,
+    backgroundColor: Colors.white,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+    overflow: "hidden",
+  },
   tileText: { fontWeight: "800", color: Colors.text, fontSize: 14, lineHeight: 18 },
-  aiBtn: { marginTop: 14, backgroundColor: Colors.green, paddingVertical: 12, borderRadius: 14, alignItems: "center" },
+  aiBtn: {
+    marginTop: 14,
+    backgroundColor: Colors.green,
+    paddingVertical: 12,
+    borderRadius: 14,
+    alignItems: "center",
+  },
   aiBtnText: { color: Colors.white, fontWeight: "800", fontSize: 16 },
-  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 20 },
-  modalCard: { width: "100%", maxWidth: 420, backgroundColor: Colors.white, borderRadius: 14, padding: 16, borderWidth: 1, borderColor: "rgba(0,0,0,0.08)" },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: Colors.white,
+    borderRadius: 14,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.08)",
+  },
   modalTitle: { fontSize: 16, fontWeight: "800", color: Colors.text, marginBottom: 10 },
-  modalInput: { borderWidth: 1, borderColor: "#D6D3C8", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, fontWeight: "800", color: Colors.text },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: "#D6D3C8",
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    fontWeight: "800",
+    color: Colors.text,
+  },
   modalRow: { flexDirection: "row", gap: 12, marginTop: 12, justifyContent: "flex-end" },
   modalBtn: { paddingVertical: 12, paddingHorizontal: 18, borderRadius: 10, borderWidth: 2, borderColor: Colors.green },
   modalCancel: { backgroundColor: Colors.white },

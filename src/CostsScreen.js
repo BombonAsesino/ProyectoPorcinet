@@ -1,12 +1,10 @@
 // src/CostsScreen.js
 
-
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   View,
   Text,
   StyleSheet,
-  
   ScrollView,
   TextInput,
   TouchableOpacity,
@@ -26,6 +24,11 @@ import {
   deleteDoc,
 } from "firebase/firestore";
 
+/* ✅ Offline */
+import { initDB, run, all } from "./db/database"; // <-- Asegura esta ruta
+import * as Network from "expo-network";
+import { useIsFocused } from "@react-navigation/native";
+
 /* ====== Estilos/colores ====== */
 const Colors = {
   green: "#843a3a",
@@ -38,142 +41,322 @@ const Colors = {
   bad: "#843a3a",
 };
 
-
-
 /* ====== Dominios ====== */
 const CATEGORIES = ["Alimentación", "Salud", "Mantenimiento"];
 
 function getMonthKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
+const toYYYYMMDD = (d) => d.toISOString().slice(0, 10);
+const normalizeDateStr = (val) => {
+  if (!val) return toYYYYMMDD(new Date());
+  if (val?.toDate) return toYYYYMMDD(val.toDate());
+  if (typeof val === "object" && val.seconds != null) {
+    return toYYYYMMDD(new Date(val.seconds * 1000));
+  }
+  try { return toYYYYMMDD(new Date(val)); } catch { return toYYYYMMDD(new Date()); }
+};
+
+/* 🔧 Helpers de fecha */
+function toDateFromISOorYMD(s) {
+  try {
+    if (!s) return new Date();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(`${s}T00:00:00`);
+    return new Date(s);
+  } catch {
+    return new Date();
+  }
+}
+const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
+const daysInMonth = (y, m /* 0-11 */) => new Date(y, m + 1, 0).getDate();
+
+/* ====== Esquema local ====== */
+const ensureCostSchema = async () => {
+  await initDB();
+  await run(
+    "CREATE TABLE IF NOT EXISTS costs (id INTEGER PRIMARY KEY AUTOINCREMENT, concept TEXT, category TEXT, amount REAL, date TEXT, notes TEXT, deleted INTEGER DEFAULT 0, updated_at TEXT);"
+  );
+  try { await run("ALTER TABLE costs ADD COLUMN cloud_id TEXT"); } catch {}
+  try { await run("ALTER TABLE costs ADD COLUMN synced INTEGER DEFAULT 0"); } catch {}
+  try { await run("ALTER TABLE costs ADD COLUMN month_key TEXT"); } catch {}
+  await run("UPDATE costs SET month_key = substr(date,1,7) WHERE month_key IS NULL OR month_key=''");
+  await run(
+    "CREATE TABLE IF NOT EXISTS pending_ops (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, target_id TEXT NOT NULL, payload TEXT, created_at TEXT DEFAULT (datetime('now')));"
+  );
+  await run("CREATE INDEX IF NOT EXISTS idx_pending_ops_op ON pending_ops(op)");
+  await run("CREATE INDEX IF NOT EXISTS idx_pending_ops_target ON pending_ops(target_id)");
+};
 
 export function CostsScreen() {
   const [expenses, setExpenses] = useState([]);
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Alimentación");
   const [note, setNote] = useState("");
-  const [currentMonth, setCurrentMonth] = useState(new Date());
-
-  // edición
+  const [currentMonth, setCurrentMonth] = useState(startOfMonth(new Date())); // ✅ anclado al 1
   const [editingId, setEditingId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const isFocused = useIsFocused();
 
   const monthKey = getMonthKey(currentMonth);
 
-  // ====== Cargar gastos del mes ======
+  /* ====== Cargar gastos del mes (Offline-First) ====== */
   const fetchExpenses = useCallback(async () => {
+    setLoading(true);
     try {
-      const u = auth.currentUser;
-      if (!u) return;
+      await ensureCostSchema();
 
-      const q = query(
-  collection(db, "costs"),
-  where("uid", "==", u.uid),
-  where("monthKey", "==", monthKey)
-);
+      // No mostrar elementos en cola de borrado remoto
+      const pendDel = await all("SELECT target_id FROM pending_ops WHERE op='delete'", []);
+      const pendingDeleteIds = new Set(pendDel.map((r) => r.target_id));
 
-      const snap = await getDocs(q);
-      const arr = [];
-      snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-      // ordenar por fecha descendente en cliente (evita índice compuesto)
-      arr.sort((a, b) => {
-        const da = a.date?.toDate ? a.date.toDate() : new Date(a.date || 0);
-        const dbb = b.date?.toDate ? b.date.toDate() : new Date(b.date || 0);
-        return dbb - da;
+      // 1) Local primero
+      const localRows = await all(
+        `SELECT id, category, amount, notes AS note, date, cloud_id
+           FROM costs
+          WHERE deleted=0 AND date LIKE ?
+          ORDER BY date DESC, id DESC`,
+        [`${monthKey}-%`]
+      );
+
+      const locals = localRows.map((r) => {
+        const cloudIdNorm = (r.cloud_id ?? "").trim();
+        return {
+          id: `local:${r.id}`,
+          amount: Number(r.amount || 0),
+          category: r.category || "Alimentación",
+          note: r.note || "",
+          dateStr: normalizeDateStr(r.date),
+          cloud_id: cloudIdNorm.length ? cloudIdNorm : null,
+        };
       });
-      setExpenses(arr);
+
+      const byKey = new Map();
+      for (const l of locals) {
+        const key = l.cloud_id || l.id; // local manda
+        byKey.set(key, l);
+      }
+
+      // 2) Remoto
+      try {
+        const u = auth.currentUser;
+        if (u) {
+          const qy = query(
+            collection(db, "costs"),
+            where("uid", "==", u.uid),
+            where("monthKey", "==", monthKey)
+          );
+          const snap = await getDocs(qy);
+          snap.forEach((d) => {
+            if (pendingDeleteIds.has(d.id)) return;
+            const key = d.id;
+            if (byKey.has(key)) return;
+
+            const data = d.data();
+            byKey.set(key, {
+              id: d.id,
+              amount: Number(data.amount || 0),
+              category: data.category || "Alimentación",
+              note: data.note || "",
+              dateStr: normalizeDateStr(data.date),
+              cloud_id: d.id,
+            });
+          });
+        }
+      } catch {
+        // sin red: solo locales
+      }
+
+      const merged = Array.from(byKey.values()).sort(
+        (a, b) => new Date(b.dateStr) - new Date(a.dateStr)
+      );
+
+      setExpenses(merged);
     } catch (e) {
       console.error("Error load expenses", e);
+    } finally {
+      setLoading(false);
     }
   }, [monthKey]);
 
-  useEffect(() => {
-    fetchExpenses();
-  }, [fetchExpenses]);
+  useEffect(() => { fetchExpenses(); }, [fetchExpenses]);
+  useEffect(() => { if (isFocused) fetchExpenses(); }, [isFocused, fetchExpenses]);
 
-  // ====== Guardar (crear o actualizar) ======
- const saveExpense = async () => {
-  const u = auth.currentUser;
-  if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
+  /* ====== Guardar (crear o actualizar) ====== */
+  const saveExpense = async () => {
+    const u = auth.currentUser;
+    if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
 
-  const amt = parseFloat(amount);
-  if (!Number.isFinite(amt) || amt <= 0) {
-    return Alert.alert("Error", "Monto inválido.");
-  }
-  if (!CATEGORIES.includes(category)) {
-    return Alert.alert("Error", "Categoría inválida.");
-  }
-
-  try {
-    if (editingId) {
-      // 👉 editar AHORA en la colección 'costs'
-      await updateDoc(doc(db, "costs", editingId), {
-        amount: amt,
-        category,
-        note: note.trim(),
-        updatedAt: serverTimestamp(),
-      });
-      Alert.alert("Actualizado", "Gasto editado correctamente.");
-    } else {
-      // 👉 crear en 'costs' asegurando uid, date y monthKey
-      await addDoc(collection(db, "costs"), {
-        uid: u.uid,
-        amount: amt,
-        category,
-        note: note.trim(),
-        date: new Date(),
-        monthKey,
-        createdAt: serverTimestamp(),
-        updatedAt: null,
-      });
-      Alert.alert("Guardado", "Gasto registrado.");
+    const amt = parseFloat(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      return Alert.alert("Error", "Monto inválido.");
+    }
+    if (!CATEGORIES.includes(category)) {
+      return Alert.alert("Error", "Categoría inválida.");
     }
 
-    // limpiar y refrescar
-    setAmount("");
-    setNote("");
-    setCategory("Alimentación");
-    setEditingId(null);
-    fetchExpenses();
-  } catch (e) {
-    console.error("saveExpense", e);
-    Alert.alert("Error", "No se pudo guardar el gasto.");
-  }
-};
+    try {
+      await ensureCostSchema();
+      const net = await Network.getNetworkStateAsync();
 
+      // ✅ FECHA BASE SIEMPRE EN EL MES MOSTRADO (día = hoy, con clamp al fin de mes)
+      const today = new Date();
+      const y = currentMonth.getFullYear();
+      const m = currentMonth.getMonth();
+      const maxDay = daysInMonth(y, m);
+      const day = Math.min(today.getDate(), maxDay);
+      const baseDate = new Date(y, m, day);
+      const baseStr = toYYYYMMDD(baseDate);
 
-  // ====== Eliminar ======
-  const deleteExpense = async (id) => {
-  const u = auth.currentUser;
-  if (!u) return;
+      // preservamos fecha en edición
+      const currentItem = editingId ? expenses.find((e) => e.id === editingId) : null;
+      const dateStr = editingId && currentItem?.dateStr ? currentItem.dateStr : baseStr;
 
-  Alert.alert("Eliminar", "¿Deseas eliminar este gasto?", [
-    { text: "Cancelar", style: "cancel" },
-    {
-      text: "Eliminar",
-      style: "destructive",
-      onPress: async () => {
-        try {
-          // 👉 eliminar AHORA en 'costs'
-          await deleteDoc(doc(db, "costs", id));
-
-          if (editingId === id) {
-            setEditingId(null);
-            setAmount("");
-            setNote("");
-            setCategory("Alimentación");
+      if (editingId) {
+        // Editar
+        if (editingId.startsWith("local:")) {
+          const localId = editingId.split(":")[1];
+          await run(
+            `UPDATE costs SET category=?, amount=?, notes=?, date=?, month_key=?, updated_at=datetime('now'), synced=0 WHERE id=?`,
+            [category, amt, note.trim(), dateStr, getMonthKey(new Date(dateStr)), localId]
+          );
+          setExpenses((prev) =>
+            prev.map((e) => (e.id === editingId ? { ...e, amount: amt, category, note, dateStr } : e))
+          );
+          Alert.alert("Actualizado", "Gasto actualizado localmente.");
+        } else {
+          if (net.isConnected) {
+            await updateDoc(doc(db, "costs", editingId), {
+              amount: amt,
+              category,
+              note: note.trim(),
+              date: new Date(dateStr),
+              monthKey: getMonthKey(new Date(dateStr)),
+              updatedAt: serverTimestamp(),
+            });
+            await run(
+              `UPDATE costs SET category=?, amount=?, notes=?, date=?, month_key=?, synced=1, updated_at=datetime('now') WHERE cloud_id=?`,
+              [category, amt, note.trim(), dateStr, getMonthKey(new Date(dateStr)), editingId]
+            );
+            setExpenses((prev) =>
+              prev.map((e) => (e.id === editingId ? { ...e, amount: amt, category, note, dateStr } : e))
+            );
+            Alert.alert("Actualizado", "Gasto editado correctamente.");
+          } else {
+            // OFFLINE: espejo local con cloud_id y synced=0
+            const mirror = await all(`SELECT id FROM costs WHERE cloud_id=? LIMIT 1`, [editingId]);
+            if (mirror.length) {
+              await run(
+                `UPDATE costs SET category=?, amount=?, notes=?, date=?, month_key=?, synced=0, updated_at=datetime('now') WHERE cloud_id=?`,
+                [category, amt, note.trim(), dateStr, getMonthKey(new Date(dateStr)), editingId]
+              );
+            } else {
+              await run(
+                `INSERT INTO costs (concept, category, amount, date, notes, deleted, updated_at, synced, cloud_id, month_key)
+                 VALUES (?, ?, ?, ?, ?, 0, datetime('now'), 0, ?, ?)`,
+                [category, category, amt, dateStr, note.trim(), editingId, getMonthKey(new Date(dateStr))]
+              );
+            }
+            setExpenses((prev) =>
+              prev.map((e) =>
+                e.id === editingId
+                  ? { ...e, amount: amt, category, note, dateStr }
+                  : e
+              )
+            );
+            Alert.alert("Guardado", "Cambios guardados localmente (offline).");
           }
-          fetchExpenses();
-        } catch (e) {
-          console.error("deleteExpense", e);
-          Alert.alert("Error", "No se pudo eliminar el gasto.");
         }
+      } else {
+        // Crear
+        if (net.isConnected) {
+          const ref = await addDoc(collection(db, "costs"), {
+            uid: u.uid,
+            amount: amt,
+            category,
+            note: note.trim(),
+            date: baseDate,                                           // ✅ mes mostrado (clamp día)
+            monthKey: getMonthKey(baseDate),                          // ✅ mes mostrado
+            createdAt: serverTimestamp(),
+            updatedAt: null,
+          });
+          await run(
+            `INSERT INTO costs (concept, category, amount, date, notes, deleted, updated_at, synced, cloud_id, month_key)
+             VALUES (?, ?, ?, ?, ?, 0, datetime('now'), 1, ?, ?)`,
+            [category, category, amt, baseStr, note.trim(), ref.id, getMonthKey(baseDate)]
+          );
+          Alert.alert("Guardado", "Gasto registrado.");
+        } else {
+          await run(
+            `INSERT INTO costs (concept, category, amount, date, notes, deleted, updated_at, synced, cloud_id, month_key)
+             VALUES (?, ?, ?, ?, ?, 0, datetime('now'), 0, NULL, ?)`,
+            [category, category, amt, baseStr, note.trim(), getMonthKey(baseDate)] // ✅ mes mostrado
+          );
+          Alert.alert("Guardado", "Gasto guardado localmente (offline).");
+        }
+        await fetchExpenses();
+      }
+
+      setAmount("");
+      setNote("");
+      setCategory("Alimentación");
+      setEditingId(null);
+    } catch (e) {
+      console.error("saveExpense", e);
+      Alert.alert("Error", "No se pudo guardar el gasto.");
+    }
+  };
+
+  /* ====== Eliminar ====== */
+  const deleteExpense = async (id) => {
+    const u = auth.currentUser;
+    if (!u) return;
+
+    Alert.alert("Eliminar", "¿Deseas eliminar este gasto?", [
+      { text: "Cancelar", style: "cancel" },
+      {
+        text: "Eliminar",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await ensureCostSchema();
+            const net = await Network.getNetworkStateAsync();
+
+            if (id.startsWith("local:")) {
+              const localId = id.split(":")[1];
+              await run(`UPDATE costs SET deleted=1, updated_at=datetime('now') WHERE id=?`, [localId]);
+
+              const row = await all("SELECT cloud_id FROM costs WHERE id=?", [localId]);
+              const cloudId = (row?.[0]?.cloud_id ?? "").trim();
+              if (cloudId) {
+                if (net.isConnected) {
+                  try { await deleteDoc(doc(db, "costs", cloudId)); }
+                  catch { await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [cloudId]); }
+                } else {
+                  await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [cloudId]);
+                }
+              }
+            } else {
+              await run(`UPDATE costs SET deleted=1, updated_at=datetime('now') WHERE cloud_id=?`, [id]);
+              if (net.isConnected) {
+                try { await deleteDoc(doc(db, "costs", id)); }
+                catch { await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [id]); }
+              } else {
+                await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [id]);
+              }
+            }
+
+            setExpenses((prev) => prev.filter((e) => e.id !== id && e.cloud_id !== id));
+            Alert.alert("Eliminado", "Gasto eliminado.");
+          } catch (e) {
+            console.error("deleteExpense", e);
+            Alert.alert("Error", "No se pudo eliminar el gasto.");
+          }
+        },
       },
-    },
-  ]);
-};
+    ]);
+  };
 
-
-  // ====== Preparar edición ======
+  /* ====== Preparar edición ====== */
   const startEdit = (item) => {
     setEditingId(item.id);
     setAmount(String(item.amount ?? ""));
@@ -188,37 +371,130 @@ export function CostsScreen() {
     setCategory("Alimentación");
   };
 
-  // ====== Cálculos ======
+  /* 🔁 Sincronizar locales al volver la conexión (creaciones + ediciones) */
+  const syncPendingLocals = async () => {
+    const u = auth.currentUser;
+    if (!u) return;
+
+    try {
+      await ensureCostSchema();
+      const net = await Network.getNetworkStateAsync();
+      if (!net.isConnected) return;
+
+      // 1) Subir todos los registros creados offline (synced=0, cloud_id IS NULL)
+      const newRows = await all(
+        `SELECT id, category, amount, notes, date, month_key
+           FROM costs
+          WHERE deleted=0 AND synced=0 AND (cloud_id IS NULL OR cloud_id='')`
+      );
+
+      for (const r of newRows) {
+        const dateObj = toDateFromISOorYMD(r.date);
+        const mk = r.month_key || getMonthKey(dateObj);
+
+        const ref = await addDoc(collection(db, "costs"), {
+          uid: u.uid,
+          amount: Number(r.amount || 0),
+          category: r.category || "Alimentación",
+          note: r.notes || "",
+          date: dateObj,
+          monthKey: mk,
+          createdAt: serverTimestamp(),
+          updatedAt: null,
+        });
+
+        await run(
+          `UPDATE costs SET synced=1, cloud_id=?, updated_at=datetime('now') WHERE id=?`,
+          [ref.id, r.id]
+        );
+      }
+
+      // 2) Enviar EDICIONES offline (synced=0, cloud_id NOT NULL)
+      const updRows = await all(
+        `SELECT id, cloud_id, category, amount, notes, date, month_key
+           FROM costs
+          WHERE deleted=0 AND synced=0 AND cloud_id IS NOT NULL AND cloud_id <> ''`
+      );
+
+      for (const r of updRows) {
+        const dateObj = toDateFromISOorYMD(r.date);
+        const mk = r.month_key || getMonthKey(dateObj);
+
+        await updateDoc(doc(db, "costs", (r.cloud_id ?? "").trim()), {
+          amount: Number(r.amount || 0),
+          category: r.category || "Alimentación",
+          note: r.notes || "",
+          date: dateObj,
+          monthKey: mk,
+          updatedAt: serverTimestamp(),
+        });
+
+        await run(
+          `UPDATE costs SET synced=1, updated_at=datetime('now') WHERE id=?`,
+          [r.id]
+        );
+      }
+
+      // 3) Procesar pendientes de eliminación
+      const pendDel = await all("SELECT id, target_id FROM pending_ops WHERE op='delete'");
+      for (const pd of pendDel) {
+        try {
+          await deleteDoc(doc(db, "costs", pd.target_id));
+          await run("DELETE FROM pending_ops WHERE id=?", [pd.id]);
+        } catch {
+          // si falla, queda para el siguiente respaldo
+        }
+      }
+
+      await fetchExpenses();
+    } catch (e) {
+      console.error("syncPendingLocals", e);
+    }
+  };
+
+  /* 🔁 Auto-sync cuando vuelves a la pantalla y hay internet */
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const net = await Network.getNetworkStateAsync();
+        if (mounted && net.isConnected) {
+          await syncPendingLocals();
+        }
+      } catch {}
+    })();
+    return () => { mounted = false; };
+  }, [isFocused]);
+
+  /* ====== Cálculos ====== */
   const { totals, totalGeneral } = useMemo(() => {
     const t = { Alimentación: 0, Salud: 0, Mantenimiento: 0 };
     let total = 0;
     expenses.forEach((e) => {
       if (t[e.category] !== undefined) {
-        t[e.category] += e.amount;
-        total += e.amount;
+        const v = Number(e.amount || 0);
+        t[e.category] += v;
+        total += v;
       }
     });
     return { totals: t, totalGeneral: total };
   }, [expenses]);
 
   const validationOk =
-    Math.round(
-      totals["Alimentación"] + totals["Salud"] + totals["Mantenimiento"]
-    ) === Math.round(totalGeneral);
+    Math.round(totals["Alimentación"] + totals["Salud"] + totals["Mantenimiento"]) ===
+    Math.round(totalGeneral);
 
-  // ====== Cambio de mes ======
+  /* ====== Cambio de mes (anclado al día 1 para evitar desbordes) ====== */
   const prevMonth = () => {
-    const d = new Date(currentMonth);
-    d.setMonth(d.getMonth() - 1);
+    const d = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1); // ✅
     setCurrentMonth(d);
   };
   const nextMonth = () => {
-    const d = new Date(currentMonth);
-    d.setMonth(d.getMonth() + 1);
+    const d = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1); // ✅
     setCurrentMonth(d);
   };
 
-  // ====== UI ======
+  /* ====== UI ====== */
   return (
     <ScrollView style={{ flex: 1, backgroundColor: Colors.beige }}>
       {/* Header mes */}
@@ -316,11 +592,12 @@ export function CostsScreen() {
       {/* Listado del mes */}
       <View style={styles.panel}>
         <Text style={styles.panelTitle}>Gastos del mes</Text>
-        {expenses.length === 0 ? (
+        {loading ? (
+          <Text style={{ color: Colors.muted }}>Cargando…</Text>
+        ) : expenses.length === 0 ? (
           <Text style={{ color: Colors.muted, fontWeight: "700" }}>No hay registros.</Text>
         ) : (
           expenses.map((it) => {
-            const d = it.date?.toDate ? it.date.toDate() : (it.date ? new Date(it.date) : null);
             return (
               <View key={it.id} style={styles.itemRow}>
                 <View style={{ flex: 1 }}>
@@ -332,11 +609,9 @@ export function CostsScreen() {
                       {it.note}
                     </Text>
                   )}
-                  {d && (
-                    <Text style={{ color: Colors.muted, fontSize: 12 }}>
-                      {d.toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" })}
-                    </Text>
-                  )}
+                  <Text style={{ color: Colors.muted, fontSize: 12 }}>
+                    {it.dateStr || ""}
+                  </Text>
                 </View>
 
                 <View style={{ flexDirection: "row", gap: 8 }}>
@@ -446,6 +721,10 @@ const styles = StyleSheet.create({
   },
 });
 
+/* ===========================
+   🔁 Tus funciones de respaldo
+   (NO tocadas)
+=========================== */
 
 // Lee todos los gastos del usuario (para armar el payload del respaldo)
 export async function getExpensesForBackup(uid) {
@@ -455,7 +734,6 @@ export async function getExpensesForBackup(uid) {
   const snap = await getDocs(q);
   snap.forEach((d) => {
     const data = d.data();
-    // Serializamos fechas a ISO para que el backup sea 100% JSON
     const dateISO =
       data.date?.toDate ? data.date.toDate().toISOString() : (data.date || null);
     out.push({
@@ -488,3 +766,71 @@ export async function restoreExpensesFromBackup(uid, items = []) {
     });
   }
 }
+
+/* 👇 Export opcional para respaldar desde otra pantalla (no interfiere) */
+export async function syncPendingCostsNow() {
+  try {
+    await initDB();
+    const net = await Network.getNetworkStateAsync();
+    if (!net.isConnected) return;
+
+    const u = auth.currentUser;
+    if (!u) return;
+
+    // Nuevos (sin cloud_id)
+    const newRows = await all(
+      `SELECT id, category, amount, notes, date, month_key
+         FROM costs
+        WHERE deleted=0 AND synced=0 AND (cloud_id IS NULL OR cloud_id='')`
+    );
+    for (const r of newRows) {
+      const dateObj = toDateFromISOorYMD(r.date);
+      const mk = r.month_key || getMonthKey(dateObj);
+      const ref = await addDoc(collection(db, "costs"), {
+        uid: u.uid,
+        amount: Number(r.amount || 0),
+        category: r.category || "Alimentación",
+        note: r.notes || "",
+        date: dateObj,
+        monthKey: mk,
+        createdAt: serverTimestamp(),
+        updatedAt: null,
+      });
+      await run(`UPDATE costs SET synced=1, cloud_id=?, updated_at=datetime('now') WHERE id=?`, [ref.id, r.id]);
+    }
+
+    // Ediciones (con cloud_id)
+    const updRows = await all(
+      `SELECT id, cloud_id, category, amount, notes, date, month_key
+         FROM costs
+        WHERE deleted=0 AND synced=0 AND cloud_id IS NOT NULL AND cloud_id <> ''`
+    );
+    for (const r of updRows) {
+      const dateObj = toDateFromISOorYMD(r.date);
+      const mk = r.month_key || getMonthKey(dateObj);
+      await updateDoc(doc(db, "costs", (r.cloud_id ?? "").trim()), {
+        amount: Number(r.amount || 0),
+        category: r.category || "Alimentación",
+        note: r.notes || "",
+        date: dateObj,
+        monthKey: mk,
+        updatedAt: serverTimestamp(),
+      });
+      await run(`UPDATE costs SET synced=1, updated_at=datetime('now') WHERE id=?`, [r.id]);
+    }
+
+    // Deletes pendientes
+    const pendDel = await all("SELECT id, target_id FROM pending_ops WHERE op='delete'");
+    for (const pd of pendDel) {
+      try {
+        await deleteDoc(doc(db, "costs", pd.target_id));
+        await run("DELETE FROM pending_ops WHERE id=?", [pd.id]);
+      } catch {}
+    }
+  } catch (e) {
+    console.error("syncPendingCostsNow", e);
+  }
+}
+
+/* 👇 (extra seguro) también exporto default SIN quitar tu export nombrado */
+export default CostsScreen;

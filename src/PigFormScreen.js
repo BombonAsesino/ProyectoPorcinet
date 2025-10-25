@@ -1,17 +1,32 @@
 // src/PigFormScreen.js
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ScrollView } from "react-native";
+import {
+  View,
+  Text,
+  StyleSheet,
+  TextInput,
+  TouchableOpacity,
+  Alert,
+  ScrollView,
+  DeviceEventEmitter,
+} from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { auth, db } from "../database";
 import {
   doc,
   getDoc,
-  setDoc,
   addDoc,
   collection,
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
+
+/* ✅ Soporte offline */
+import * as Network from "expo-network";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+const OFFLINE_QUEUE_KEY = "animals_offline_queue_v1";
+const ANIMALS_CACHE_KEY = "animals_local_cache_v1"; // ✅ caché que lee la lista
 
 const Colors = {
   green: "#843a3a",
@@ -29,12 +44,53 @@ function parseYMD(s) {
   return new Date(y, m - 1, d);
 }
 
+function isValidYMD(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split("-").map((n) => parseInt(n, 10));
+  const dt = new Date(y, m - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+}
+
+// ✅ helpers caché
+async function readCache() {
+  try {
+    const raw = await AsyncStorage.getItem(ANIMALS_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+async function writeCache(arr) {
+  try {
+    await AsyncStorage.setItem(ANIMALS_CACHE_KEY, JSON.stringify(arr));
+  } catch {}
+}
+async function upsertCacheItem(item) {
+  // usa cloudId si existe para evitar duplicados; si no, usa par earTag|name
+  const keyOf = (o) =>
+    `${(o.earTag || "").toString()}|${(o.name || "").toString()}`.toLowerCase();
+  const cache = await readCache();
+
+  let updated = false;
+  const next = cache.map((x) => {
+    const sameCloud = item.cloudId && x.cloudId && String(x.cloudId) === String(item.cloudId);
+    const samePair = keyOf(x) === keyOf(item);
+    if (sameCloud || (!x.cloudId && samePair)) {
+      updated = true;
+      return { ...x, ...item };
+    }
+    return x;
+  });
+  if (!updated) next.unshift(item);
+  await writeCache(next);
+}
+
 export default function PigFormScreen({ navigation, route }) {
   const id = route?.params?.id || null;
 
   const [earTag, setEarTag] = useState("");
   const [name, setName] = useState("");
-  const [birthStr, setBirthStr] = useState(""); // YYYY-MM-DD
+  const [birthStr, setBirthStr] = useState("");
   const [status, setStatus] = useState("activa");
   const [parity, setParity] = useState("0");
   const [notes, setNotes] = useState("");
@@ -65,9 +121,47 @@ export default function PigFormScreen({ navigation, route }) {
     })();
   }, [id]);
 
+  const validateForm = () => {
+    const errors = [];
+    if (!earTag.trim()) errors.push("• El campo 'Arete / Código' es obligatorio.");
+    if (!name.trim()) errors.push("• El campo 'Nombre' es obligatorio.");
+    if (birthStr.trim() && !isValidYMD(birthStr.trim())) {
+      errors.push("• La 'Fecha de nacimiento' debe tener formato válido (YYYY-MM-DD).");
+    }
+    const p = parseInt(parity, 10);
+    if (!Number.isFinite(p) || p < 0) {
+      errors.push("• El campo 'Partos' debe ser un número entero mayor o igual a 0.");
+    }
+    if (errors.length > 0) {
+      Alert.alert("Campos incompletos", errors.join("\n"));
+      return false;
+    }
+    return true;
+  };
+
+  /* ===== Offline helpers ===== */
+  const enqueueOffline = async (record) => {
+    try {
+      const prev = await AsyncStorage.getItem(OFFLINE_QUEUE_KEY);
+      const arr = prev ? JSON.parse(prev) : [];
+      arr.unshift(record);
+      await AsyncStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(arr));
+    } catch (e) {
+      console.log("enqueueOffline error:", e);
+    }
+  };
+
+  // ✅ Agrega o actualiza caché local (lista)
+  const addToLocalCache = async (cachedItem) => {
+    await upsertCacheItem(cachedItem);
+    DeviceEventEmitter.emit("animals:changed", { type: "offline-add", item: cachedItem });
+  };
+
   const save = async () => {
     const uid = auth.currentUser?.uid;
     if (!uid) return Alert.alert("Sesión", "Debes iniciar sesión.");
+
+    if (!validateForm()) return;
 
     const birthDate = parseYMD(birthStr);
     const payload = {
@@ -83,20 +177,93 @@ export default function PigFormScreen({ navigation, route }) {
 
     try {
       setBusy(true);
+
+      // Chequeo de red
+      const net = await Network.getNetworkStateAsync();
+      if (!net?.isConnected) {
+        // Guardado OFFLINE: encola y agrega al caché del listado
+        const safePayload = {
+          ...payload,
+          updatedAt: new Date().toISOString(),
+          birthDate: birthDate ? birthDate.toISOString() : null,
+        };
+
+        const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        await enqueueOffline({
+          action: id ? "update" : "create",
+          id: id || null,
+          payload: safePayload,
+          enqueuedAt: new Date().toISOString(),
+        });
+
+        await addToLocalCache({
+          localId,
+          cloudId: null,
+          uid,
+          earTag: safePayload.earTag,
+          name: safePayload.name,
+          birthDate: safePayload.birthDate,
+          status: safePayload.status,
+          parity: safePayload.parity,
+          notes: safePayload.notes,
+          createdAt: new Date().toISOString(),
+          offline: true,
+        });
+
+        Alert.alert(
+          "Guardado offline",
+          "La cerda se guardó localmente y ya aparece en la lista. Se sincronizará al reconectarte."
+        );
+        navigation.goBack();
+        return;
+      }
+
+      // === Flujo online ===
       if (id) {
         await updateDoc(doc(db, "animals", id), payload);
+
+        // ✅ espejo en caché para persistencia post-reinicio
+        await addToLocalCache({
+          cloudId: id,
+          uid,
+          earTag: payload.earTag,
+          name: payload.name,
+          birthDate: birthDate ? birthDate.toISOString() : null,
+          status: payload.status,
+          parity: payload.parity,
+          notes: payload.notes,
+          createdAt: new Date().toISOString(),
+          offline: false,
+        });
+
         Alert.alert("Actualizado", "Cerda actualizada correctamente.");
       } else {
-        await addDoc(collection(db, "animals"), {
+        const ref = await addDoc(collection(db, "animals"), {
           ...payload,
           createdAt: serverTimestamp(),
         });
-        Alert.alert("Guardado", "Cerda registrada.");
+
+        // ✅ espejo en caché con cloudId del doc creado
+        await addToLocalCache({
+          cloudId: ref.id,
+          uid,
+          earTag: payload.earTag,
+          name: payload.name,
+          birthDate: birthDate ? birthDate.toISOString() : null,
+          status: payload.status,
+          parity: payload.parity,
+          notes: payload.notes,
+          createdAt: new Date().toISOString(), // usable para ordenar localmente
+          offline: false,
+        });
+
+        Alert.alert("Guardado", "Cerda registrada correctamente.");
       }
       navigation.goBack();
     } catch (e) {
       console.log(e);
-      Alert.alert("Error", "No se pudo guardar.");
+      Alert.alert("Error", "No se pudo guardar la información.");
     } finally {
       setBusy(false);
     }
@@ -118,7 +285,7 @@ export default function PigFormScreen({ navigation, route }) {
         <Text style={styles.label}>Nombre</Text>
         <TextInput
           style={styles.input}
-          placeholder="Opcional"
+          placeholder="Ej: Chanchita"
           value={name}
           onChangeText={setName}
         />

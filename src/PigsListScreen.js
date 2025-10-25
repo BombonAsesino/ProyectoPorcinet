@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  DeviceEventEmitter,
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { auth, db } from "../database";
@@ -21,6 +22,10 @@ import {
   orderBy,
 } from "firebase/firestore";
 
+/* ✅ soporte offline */
+import * as Network from "expo-network";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
 const Colors = {
   green: "#843a3a",
   beige: "#FFF7EA",
@@ -31,38 +36,218 @@ const Colors = {
   border: "rgba(0,0,0,0.08)",
 };
 
+const ANIMALS_CACHE_KEY = "animals_local_cache_v1";
+const OFFLINE_QUEUE_KEY = "animals_offline_queue_v1";
+
+// === helpers offline ===
+async function readLocalCache() {
+  try {
+    const raw = await AsyncStorage.getItem(ANIMALS_CACHE_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return arr.map((x) => ({
+      ...x,
+      id: x.cloudId || x.localId || `local-${Math.random().toString(36).slice(2, 8)}`,
+      offline: !!x.offline,
+    }));
+  } catch (e) {
+    console.log("readLocalCache error:", e);
+    return [];
+  }
+}
+
+async function writeLocalCache(arr) {
+  try {
+    await AsyncStorage.setItem(ANIMALS_CACHE_KEY, JSON.stringify(arr));
+  } catch (e) {
+    console.log("writeLocalCache error:", e);
+  }
+}
+
+async function readQueue() {
+  try {
+    const raw = await AsyncStorage.getItem(OFFLINE_QUEUE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    console.log("readQueue error:", e);
+    return [];
+  }
+}
+
+async function writeQueue(arr) {
+  try {
+    await AsyncStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(arr));
+  } catch (e) {
+    console.log("writeQueue error:", e);
+  }
+}
+
+function mergeAnimals(fsItems, cacheItems) {
+  const out = [...fsItems];
+  const seenById = new Set(fsItems.map((it) => String(it.id || "")));
+  const keyOf = (o) =>
+    `${(o.earTag || "").toString()}|${(o.name || "").toString()}`.trim().toLowerCase();
+  const seenByPair = new Set(fsItems.map(keyOf));
+
+  cacheItems.forEach((c) => {
+    const cid = String(c.cloudId || "");
+    const idDup = cid && seenById.has(cid);
+    const pairDup = seenByPair.has(keyOf(c));
+    if (!idDup && !pairDup) {
+      out.unshift({
+        ...c,
+        id: c.id || c.cloudId || c.localId || `local-${Math.random().toString(36).slice(2, 8)}`,
+        offline: !!c.offline,
+      });
+      seenByPair.add(keyOf(c));
+    }
+  });
+
+  return out;
+}
+
+// elimina del caché local por id/localId o por par (earTag|name)
+async function removeFromLocalCache(item) {
+  try {
+    const raw = await AsyncStorage.getItem(ANIMALS_CACHE_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    const keyOf = (o) =>
+      `${(o.earTag || "").toString()}|${(o.name || "").toString()}`.trim().toLowerCase();
+
+    const targetId = String(item.id || "");
+    const targetLocalId = String(item.localId || "");
+    const targetKey = keyOf(item);
+
+    const filtered = arr.filter((x) => {
+      const sameId = String(x.cloudId || x.id || "") === targetId;
+      const sameLocal = x.localId && String(x.localId) === targetLocalId;
+      const samePair = keyOf(x) === targetKey;
+      return !(sameId || sameLocal || samePair);
+    });
+
+    await writeLocalCache(filtered);
+  } catch (e) {
+    console.log("removeFromLocalCache error:", e);
+  }
+}
+
+// elimina de la cola offline las entradas "create" que correspondan a ese item
+async function removeFromQueueForItem(item) {
+  try {
+    const queue = await readQueue();
+    const keyOf = (o) =>
+      `${(o.earTag || "").toString()}|${(o.name || "").toString()}`.trim().toLowerCase();
+    const targetKey = keyOf(item);
+    const targetLocalId = String(item.localId || "");
+
+    const filtered = queue.filter((q) => {
+      if (q.action !== "create") return true; // dejamos updates
+      const p = q.payload || {};
+      const qKey = keyOf(p);
+      const qLocalId = String(q.localId || "");
+      const matches = qKey === targetKey || (targetLocalId && qLocalId === targetLocalId);
+      return !matches;
+    });
+
+    await writeQueue(filtered);
+  } catch (e) {
+    console.log("removeFromQueueForItem error:", e);
+  }
+}
+
 export default function PigsListScreen({ navigation, route }) {
   const [items, setItems] = useState([]);
   const [busy, setBusy] = useState(true);
 
-  const selectMode = route?.params?.selectMode === true;           // opcional
-  const onPick = route?.params?.onPick;                            // opcional
+  const selectMode = route?.params?.selectMode === true; // opcional
+  const onPick = route?.params?.onPick; // opcional
 
   useEffect(() => {
-    const uid = auth.currentUser?.uid;
-    if (!uid) return;
-
-    const q = query(
-      collection(db, "animals"),
-      where("uid", "==", uid),
-      orderBy("createdAt", "desc")
-    );
-
-    const off = onSnapshot(
-      q,
-      (snap) => {
-        const arr = [];
-        snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-        setItems(arr);
+    (async () => {
+      const uid = auth.currentUser?.uid;
+      if (!uid) {
+        // sin usuario → al menos muestra caché
+        const cacheOnly = await readLocalCache();
+        setItems(cacheOnly);
         setBusy(false);
-      },
-      () => setBusy(false)
-    );
+        return;
+      }
 
-    return () => off();
+      const net = await Network.getNetworkStateAsync();
+
+      if (!net?.isConnected) {
+        // SIN INTERNET → solo caché local
+        const cache = await readLocalCache();
+        setItems(cache);
+        setBusy(false);
+        return;
+      }
+
+      // ✅ CON INTERNET → precarga caché para no ver vacío
+      try {
+        const cache = await readLocalCache();
+        if (cache.length > 0) {
+          setItems(cache);
+          setBusy(false);
+        }
+      } catch {}
+
+      // Firestore + caché (puede requerir índice compuesto uid+createdAt)
+      const qRef = query(
+        collection(db, "animals"),
+        where("uid", "==", uid),
+        orderBy("createdAt", "desc")
+      );
+
+      const off = onSnapshot(
+        qRef,
+        async (snap) => {
+          const arr = [];
+          snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
+          const cache = await readLocalCache();
+          const merged = mergeAnimals(arr, cache);
+          setItems(merged);
+          setBusy(false);
+        },
+        async (err) => {
+          // ❗️Fallo (p.ej. índice no creado): muestro caché como fallback
+          console.log("onSnapshot animals error:", err?.message || err);
+          const cache = await readLocalCache();
+          setItems(cache);
+          setBusy(false);
+          // Opcional: Alert.alert("Aviso", "Mostrando datos locales mientras se prepara la nube.");
+        }
+      );
+
+      return () => off();
+    })();
   }, []);
 
+  // escuchar altas offline desde el form
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener("animals:changed", async (evt) => {
+      if (evt?.type === "offline-add") {
+        const net = await Network.getNetworkStateAsync();
+        const cache = await readLocalCache();
+
+        if (!net?.isConnected) {
+          setItems(cache);
+          return;
+        }
+
+        setItems((prev) => {
+          const fsOnly = prev.filter((x) => !x.offline);
+          return mergeAnimals(fsOnly, cache);
+        });
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  // ✅ Eliminar: si offline → borra de caché/cola y de UI; si online → Firestore
   const askDelete = useCallback((id) => {
+    const item = items.find((it) => String(it.id) === String(id));
+    if (!item) return;
+
     Alert.alert("Eliminar cerda", "¿Deseas eliminar este registro?", [
       { text: "Cancelar", style: "cancel" },
       {
@@ -70,7 +255,21 @@ export default function PigsListScreen({ navigation, route }) {
         style: "destructive",
         onPress: async () => {
           try {
+            const net = await Network.getNetworkStateAsync();
+
+            // 1) Remover de UI instantáneo
+            setItems((prev) => prev.filter((it) => String(it.id) !== String(id)));
+
+            if (!net?.isConnected || item.offline) {
+              // ✅ OFFLINE (o ítem local): limpiar caché y cola
+              await removeFromLocalCache(item);
+              await removeFromQueueForItem(item);
+              return;
+            }
+
+            // 2) ONLINE + item Firestore → borrar en Firestore
             await deleteDoc(doc(db, "animals", id));
+            // onSnapshot ajustará el estado real si hubiera algún desfasaje
           } catch (e) {
             console.log(e);
             Alert.alert("Error", "No se pudo eliminar.");
@@ -78,7 +277,7 @@ export default function PigsListScreen({ navigation, route }) {
         },
       },
     ]);
-  }, []);
+  }, [items]);
 
   const renderItem = ({ item }) => {
     const birth =
@@ -116,11 +315,15 @@ export default function PigsListScreen({ navigation, route }) {
               </Text>
             )}
           </View>
-          {!selectMode && (
-            <TouchableOpacity onPress={() => askDelete(item.id)} style={styles.iconBtn}>
-              <MaterialCommunityIcons name="trash-can" size={18} color={Colors.green} />
-            </TouchableOpacity>
-          )}
+
+          {/* Botón de eliminar */}
+          <TouchableOpacity
+            onPress={() => askDelete(item.id)}
+            style={styles.iconBtn}
+            accessibilityLabel="Eliminar cerda"
+          >
+            <MaterialCommunityIcons name="trash-can" size={18} color={Colors.green} />
+          </TouchableOpacity>
         </View>
       </TouchableOpacity>
     );
@@ -144,7 +347,7 @@ export default function PigsListScreen({ navigation, route }) {
       ) : (
         <FlatList
           data={items}
-          keyExtractor={(it) => it.id}
+          keyExtractor={(it) => String(it.id || it.localId)}
           renderItem={renderItem}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           ListEmptyComponent={

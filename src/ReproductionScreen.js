@@ -1,4 +1,4 @@
-// src/ReproductionScreen.js
+// src/ReproductionScreen.js 
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   View,
@@ -28,6 +28,14 @@ import {
   updateDoc, // ← agregado para editar eventos
 } from "firebase/firestore";
 
+/* ✅ soporte offline (NO toca tu Firebase ni estilos) */
+import * as Network from "expo-network";
+import { initDB, run, all } from "./db/database"; // ← CORREGIDO: ./db/database
+
+/* ✅ persistencia de la cerda seleccionada */
+import AsyncStorage from "@react-native-async-storage/async-storage";
+const SELECTED_SOW_KEY = "selected_sow_v1";
+
 const Colors = {
   green:  "#843a3a",
   beige: "#FFF7EA",
@@ -42,19 +50,157 @@ const Colors = {
   ok: "#843a3a",
 };
 
+// === Helper para desduplicar ===
+const uniqBy = (arr, keyFn) => {
+  const seen = new Set();
+  const out = [];
+  for (const x of arr) {
+    const k = keyFn(x);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(x);
+    }
+  }
+  return out;
+};
+
 export default function ReproductionScreen({ navigation, route }) {
   const today = new Date().toISOString().slice(0, 10);
   const [selected, setSelected] = useState(today);
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // ===== NUEVO: cerda seleccionada (H04) =====
+  // ===== cerda seleccionada (persistente) =====
   const [selectedSow, setSelectedSow] = useState(null); // { id, earTag, name }
 
+  // Guardar cerda elegida en AsyncStorage
+  const persistSelectedSow = useCallback(async (sow) => {
+    try {
+      await AsyncStorage.setItem(SELECTED_SOW_KEY, JSON.stringify({
+        id: sow?.id || null,
+        earTag: sow?.earTag || "",
+        name: sow?.name || "",
+      }));
+    } catch (e) {
+      // silencio: no romper UX si el almacenamiento falla
+    }
+  }, []);
+
+  // Cargar cerda guardada al iniciar (si no viene una por ruta)
   useEffect(() => {
-    const sow = route?.params?.pickedSow;
-    if (sow?.id) setSelectedSow(sow);
-  }, [route?.params?.pickedSow]);
+    (async () => {
+      const sowFromRoute = route?.params?.pickedSow;
+      if (sowFromRoute?.id) {
+        setSelectedSow(sowFromRoute);
+        persistSelectedSow(sowFromRoute);
+        return;
+      }
+      try {
+        const raw = await AsyncStorage.getItem(SELECTED_SOW_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.id) {
+            setSelectedSow(parsed);
+          }
+        }
+      } catch (e) {
+        // noop
+      }
+    })();
+  }, [route?.params?.pickedSow, persistSelectedSow]);
+
+  /* inicializar SQLite una sola vez */
+  useEffect(() => {
+    initDB().catch((e) => console.warn("initDB reproduction:", e));
+  }, []);
+
+  /* helpers offline */
+  const loadLocalEvents = useCallback(
+    async (sowId) => {
+      const rows = await all(
+        `SELECT * FROM reproduction WHERE deleted=0 ${sowId ? `AND sowId=?` : ""} ORDER BY date DESC`,
+        sowId ? [sowId] : []
+      );
+      return rows.map((r) => ({
+        id: r.cloud_id || `local-${r.id}`,
+        uid: r.uid,
+        sowId: r.sowId,
+        date: r.date,
+        type: r.type,
+        note: r.note,
+        ts: r.ts
+          ? { seconds: Math.floor(new Date(r.ts).getTime() / 1000) }
+          : { seconds: Math.floor(Date.now() / 1000) },
+      }));
+    },
+    []
+  );
+
+  const upsertLocalFromCloudList = useCallback(async (list) => {
+    for (const e of list) {
+      try {
+        await run(
+          `INSERT OR REPLACE INTO reproduction
+           (cloud_id, uid, sowId, date, type, note, ts, synced, deleted, updated_at)
+           VALUES (?,?,?,?,?,?,?,1,0,datetime('now'))`,
+          [
+            e.id,
+            e.uid,
+            e.sowId,
+            e.date,
+            e.type,
+            e.note || "",
+            e.ts?.seconds ? new Date(e.ts.seconds * 1000).toISOString() : new Date().toISOString(),
+          ]
+        );
+      } catch (err) {
+        console.warn("upsertLocalFromCloudList:", err);
+      }
+    }
+  }, []);
+
+  const syncPendingToCloud = useCallback(async () => {
+    try {
+      const net = await Network.getNetworkStateAsync();
+      if (!net.isConnected) return;
+      const uid = auth.currentUser?.uid || "__anon__";
+
+      // Crear pendientes
+      const pendingCreates = await all(
+        "SELECT * FROM reproduction WHERE synced=0 AND deleted=0"
+      );
+      for (const p of pendingCreates) {
+        try {
+          const ref = await addDoc(collection(db, "reproEvents"), {
+            uid,
+            sowId: p.sowId,
+            date: p.date,
+            type: p.type,
+            note: p.note || "",
+            ts: serverTimestamp(),
+          });
+          await run(`UPDATE reproduction SET cloud_id=?, synced=1 WHERE id=?`, [ref.id, p.id]);
+        } catch (e) {
+          console.warn("sync create fail:", e);
+        }
+      }
+
+      // Borrados pendientes
+      const pendingDeletes = await all(
+        "SELECT * FROM reproduction WHERE deleted=1 AND cloud_id IS NOT NULL"
+      );
+      for (const drow of pendingDeletes) {
+        try {
+          await deleteDoc(doc(db, "reproEvents", drow.cloud_id));
+          await run("DELETE FROM reproduction WHERE id=?", [drow.id]);
+        } catch (e) {
+          console.warn("sync delete fail:", e);
+        }
+      }
+    } catch (e) {
+      console.warn("syncPendingToCloud:", e);
+    }
+  }, []);
 
   // ====== Carga en tiempo real de eventos del usuario ======
   useEffect(() => {
@@ -70,35 +216,70 @@ export default function ReproductionScreen({ navigation, route }) {
       );
     }
 
-    const unsub = onSnapshot(
-      qBase,
-      (snap) => {
-        const list = [];
-        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+    /* si estás offline, cargamos desde SQLite y NO nos suscribimos */
+    let unsubscribe = null;
+    (async () => {
+      setLoading(true);
+      try {
+        const net = await Network.getNetworkStateAsync();
+        if (!net.isConnected) {
+          const localList = await loadLocalEvents(selectedSow?.id || null);
+          setEvents(localList);
+          setLoading(false);
+          return; // no abrimos onSnapshot si no hay internet
+        }
 
-        list.sort((a, b) => {
-          const ta = a.ts?.toMillis?.() ?? (a.ts?.seconds ? a.ts.seconds * 1000 : 0);
-          const tb = b.ts?.toMillis?.() ?? (b.ts?.seconds ? b.ts.seconds * 1000 : 0);
-          return tb - ta;
-        });
+        // Si hay internet, mantenemos tu lógica original de Firestore:
+        unsubscribe = onSnapshot(
+          qBase,
+          async (snap) => {
+            const list = [];
+            snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
 
-        setEvents(list);
+            list.sort((a, b) => {
+              const ta = a.ts?.toMillis?.() ?? (a.ts?.seconds ? a.ts.seconds * 1000 : 0);
+              const tb = b.ts?.toMillis?.() ?? (b.ts?.seconds ? b.ts.seconds * 1000 : 0);
+              return tb - ta;
+            });
+
+            setEvents(list);
+            setLoading(false);
+
+            // cachear en SQLite para modo offline posterior
+            await upsertLocalFromCloudList(list);
+          },
+          (err) => {
+            console.error("onSnapshot reproEvents:", err);
+            setLoading(false);
+            Alert.alert("Error", "No se pudieron cargar los eventos.");
+          }
+        );
+      } catch (e) {
+        console.error("carga eventos (mix):", e);
         setLoading(false);
-      },
-      (err) => {
-        console.error("onSnapshot reproEvents:", err);
-        setLoading(false);
-        Alert.alert("Error", "No se pudieron cargar los eventos.");
       }
-    );
-    return unsub;
-  }, [selectedSow?.id]);
+    })();
+
+    return () => {
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
+  }, [selectedSow?.id, loadLocalEvents, upsertLocalFromCloudList]);
+
+  /* sincronización automática cuando haya conexión */
+  useEffect(() => {
+    const id = setInterval(syncPendingToCloud, 7000);
+    return () => clearInterval(id);
+  }, [syncPendingToCloud]);
 
   const dayEvents = useMemo(() => events.filter((e) => e.date === selected), [events, selected]);
 
   const markedDates = useMemo(() => {
+    // Desduplicar fechas para no repetir marcado
     const m = {};
+    const seenDates = new Set();
     events.forEach((e) => {
+      if (seenDates.has(e.date)) return;
+      seenDates.add(e.date);
       m[e.date] = {
         marked: true,
         dotColor: Colors.green,
@@ -127,22 +308,47 @@ export default function ReproductionScreen({ navigation, route }) {
           );
         }
 
-        await addDoc(collection(db, "reproEvents"), {
-          uid,
-          sowId: selectedSow.id,
-          date: selected,          // YYYY-MM-DD
-          type,                    // "celo" | "monta" | "parto"
-          note: "",
-          ts: serverTimestamp(),
-        });
-
-        Alert.alert("Guardado", `Evento de ${type} registrado para ${selected}.`);
+        // decidir por conectividad
+        const net = await Network.getNetworkStateAsync();
+        if (net.isConnected) {
+          await addDoc(collection(db, "reproEvents"), {
+            uid,
+            sowId: selectedSow.id,
+            date: selected,          // YYYY-MM-DD
+            type,                    // "celo" | "monta" | "parto"
+            note: "",
+            ts: serverTimestamp(),
+          });
+          // espejo local cache
+          await run(
+            `INSERT INTO reproduction (uid,sowId,date,type,note,ts,cloud_id,synced,deleted,updated_at)
+             VALUES (?,?,?,?,?,?,NULL,1,0,datetime('now'))`,
+            [uid, selectedSow.id, selected, type, "", new Date().toISOString()]
+          );
+          // ✅ mensaje específico online
+          Alert.alert("Guardado", `Evento de ${type} registrado en la nube para ${selected}.`);
+        } else {
+          // Guardado local offline (pendiente de sincronizar)
+          await run(
+            `INSERT INTO reproduction (uid,sowId,date,type,note,ts,cloud_id,synced,deleted,updated_at)
+             VALUES (?,?,?,?,?,?,NULL,0,0,datetime('now'))`,
+            [uid, selectedSow.id, selected, type, "", new Date().toISOString()]
+          );
+          // Refrescamos lista local
+          const localList = await loadLocalEvents(selectedSow.id);
+          setEvents(localList);
+          // ✅ mensaje específico offline
+          Alert.alert(
+            "Guardado offline",
+            `El evento de ${type} se guardó localmente para ${selected}. Se sincronizará al reconectar.`
+          );
+        }
       } catch (e) {
         console.error("registerEvent:", e);
         Alert.alert("Error", "No se pudo registrar el evento.");
       }
     },
-    [selected, selectedSow?.id]
+    [selected, selectedSow?.id, loadLocalEvents]
   );
 
   const deleteLastOfSelected = useCallback(async () => {
@@ -155,17 +361,36 @@ export default function ReproductionScreen({ navigation, route }) {
         return tb - ta;
       });
       const last = ofDay[0];
-      await deleteDoc(doc(db, "reproEvents", last.id));
+
+      const net = await Network.getNetworkStateAsync();
+      if (net.isConnected && !String(last.id).startsWith("local-")) {
+        await deleteDoc(doc(db, "reproEvents", last.id));
+        await run(`DELETE FROM reproduction WHERE cloud_id=?`, [last.id]);
+      } else {
+        if (String(last.id).startsWith("local-")) {
+          const localId = String(last.id).split("-")[1];
+          await run(`UPDATE reproduction SET deleted=1, updated_at=datetime('now') WHERE id=?`, [
+            localId,
+          ]);
+        } else {
+          await run(
+            `UPDATE reproduction SET deleted=1, updated_at=datetime('now') WHERE cloud_id=?`,
+            [last.id]
+          );
+        }
+        const localList = await loadLocalEvents(selectedSow?.id || null);
+        setEvents(localList);
+      }
+
       Alert.alert("Eliminado", "Se borró el último registro del día.");
     } catch (e) {
       console.error("deleteLastOfSelected:", e);
       Alert.alert("Error", "No se pudo eliminar el registro.");
     }
-  }, [dayEvents]);
+  }, [dayEvents, selectedSow?.id, loadLocalEvents]);
 
   // ====== CRUD en cronología (EDIT / DELETE por ítem) ======
   const editEvent = async (event) => {
-    // Alert.prompt solo está en iOS; en Android usa un modal tuyo si quieres.
     Alert.prompt(
       "Editar evento",
       "Escribe una nota (opcional) para este evento.",
@@ -175,9 +400,30 @@ export default function ReproductionScreen({ navigation, route }) {
           text: "Guardar",
           onPress: async (value) => {
             try {
-              await updateDoc(doc(db, "reproEvents", event.id), {
-                note: value || "",
-              });
+              const noteVal = value || "";
+              const net = await Network.getNetworkStateAsync();
+              if (net.isConnected && !String(event.id).startsWith("local-")) {
+                await updateDoc(doc(db, "reproEvents", event.id), { note: noteVal });
+                await run(
+                  `UPDATE reproduction SET note=?, synced=1, updated_at=datetime('now') WHERE cloud_id=?`,
+                  [noteVal, event.id]
+                );
+              } else {
+                if (String(event.id).startsWith("local-")) {
+                  const localId = String(event.id).split("-")[1];
+                  await run(
+                    `UPDATE reproduction SET note=?, synced=0, updated_at=datetime('now') WHERE id=?`,
+                    [noteVal, localId]
+                  );
+                } else {
+                  await run(
+                    `UPDATE reproduction SET note=?, synced=0, updated_at=datetime('now') WHERE cloud_id=?`,
+                    [noteVal, event.id]
+                  );
+                }
+                const localList = await loadLocalEvents(selectedSow?.id || null);
+                setEvents(localList);
+              }
               Alert.alert("Actualizado", "Evento editado con éxito.");
             } catch (err) {
               console.error("editEvent:", err);
@@ -202,7 +448,20 @@ export default function ReproductionScreen({ navigation, route }) {
           style: "destructive",
           onPress: async () => {
             try {
-              await deleteDoc(doc(db, "reproEvents", event.id));
+              const net = await Network.getNetworkStateAsync();
+              if (net.isConnected && !String(event.id).startsWith("local-")) {
+                await deleteDoc(doc(db, "reproEvents", event.id));
+                await run(`DELETE FROM reproduction WHERE cloud_id=?`, [event.id]);
+              } else {
+                if (String(event.id).startsWith("local-")) {
+                  const localId = String(event.id).split("-")[1];
+                  await run(`UPDATE reproduction SET deleted=1 WHERE id=?`, [localId]);
+                } else {
+                  await run(`UPDATE reproduction SET deleted=1 WHERE cloud_id=?`, [event.id]);
+                }
+                const localList = await loadLocalEvents(selectedSow?.id || null);
+                setEvents(localList);
+              }
               Alert.alert("Eliminado", "Evento borrado.");
             } catch (err) {
               console.error("deleteEvent:", err);
@@ -233,65 +492,80 @@ export default function ReproductionScreen({ navigation, route }) {
   const computedAlerts = useMemo(() => {
     if (!events.length) return [];
 
-    const arr = [...events].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    // 1) Ordenar por fecha asc y DESDUPLICAR por (type|date|sowId)
+    const arrSorted = [...events].sort((a, b) =>
+      a.date < b.date ? -1 : a.date > b.date ? 1 : 0
+    );
+    const base = uniqBy(arrSorted, (e) => `${e.type}|${e.date}|${e.sowId || ""}`);
+
     const todayDate = parseYMD(new Date().toISOString().slice(0, 10));
     const result = [];
+    const added = new Set(); // evita duplicados de alertas
 
-    const celos = arr.filter((e) => e.type === "celo");
-    const montas = arr.filter((e) => e.type === "monta");
-    const partos = arr.filter((e) => e.type === "parto");
+    const celos = base.filter((e) => e.type === "celo");
+    const montas = base.filter((e) => e.type === "monta");
+    const partos = base.filter((e) => e.type === "parto");
 
-    // Celo sin monta > 3d
+    // Celo sin monta > 3d (una alerta por cerda y fecha de celo)
     celos.forEach((c) => {
       const cDate = parseYMD(c.date);
-      const monta = montas.find((m) => m.date >= c.date);
+      const monta = montas.find((m) => m.sowId === c.sowId && m.date >= c.date);
       if (!monta) {
         const days = diffDays(todayDate, addDays(cDate, 3));
         if (days > 0) {
-          const key = `celo-no-monta|${c.date}`;
-          result.push({
-            key,
-            level: "warn",
-            kind: "celo-no-monta",
-            refDate: c.date,
-            title: "Celo sin monta",
-            msg: `Registrar monta posterior al celo del ${c.date}. (+${days} días)`,
-          });
+          const key = `celo-no-monta|${c.sowId || ""}|${c.date}`;
+          if (!added.has(key)) {
+            added.add(key);
+            result.push({
+              key,
+              level: "warn",
+              kind: "celo-no-monta",
+              refDate: c.date,
+              title: "Celo sin monta",
+              msg: `Registrar monta posterior al celo del ${c.date}. (+${days} días)`,
+            });
+          }
         }
       }
     });
 
-    // Monta -> parto próximo/vencido
+    // Monta -> parto próximo/vencido (una alerta por cerda y fecha de monta)
     montas.forEach((m) => {
       const mDate = parseYMD(m.date);
       const due = addDays(mDate, 114);
       const maxDue = addDays(mDate, 116);
-      const parto = partos.find((p) => p.date >= m.date);
+      const parto = partos.find((p) => p.sowId === m.sowId && p.date >= m.date);
 
       if (!parto) {
         const daysToDue = diffDays(due, todayDate);
         const overdue = diffDays(todayDate, maxDue);
 
         if (overdue > 0) {
-          const key = `parto-vencido|${m.date}`;
-          result.push({
-            key,
-            level: "danger",
-            kind: "parto-vencido",
-            refDate: m.date,
-            title: "Parto vencido",
-            msg: `No se registró parto estimado de la monta del ${m.date} (vencido hace ${overdue} días).`,
-          });
+          const key = `parto-vencido|${m.sowId || ""}|${m.date}`;
+          if (!added.has(key)) {
+            added.add(key);
+            result.push({
+              key,
+              level: "danger",
+              kind: "parto-vencido",
+              refDate: m.date,
+              title: "Parto vencido",
+              msg: `No se registró parto estimado de la monta del ${m.date} (vencido hace ${overdue} días).`,
+            });
+          }
         } else if (daysToDue >= 0 && daysToDue <= 7) {
-          const key = `parto-proximo|${m.date}`;
-          result.push({
-            key,
-            level: "warn",
-            kind: "parto-proximo",
-            refDate: m.date,
-            title: "Parto próximo",
-            msg: `Se estima parto en ${daysToDue} día(s) (monta del ${m.date}).`,
-          });
+          const key = `parto-proximo|${m.sowId || ""}|${m.date}`;
+          if (!added.has(key)) {
+            added.add(key);
+            result.push({
+              key,
+              level: "warn",
+              kind: "parto-proximo",
+              refDate: m.date,
+              title: "Parto próximo",
+              msg: `Se estima parto en ${daysToDue} día(s) (monta del ${m.date}).`,
+            });
+          }
         }
       }
     });
@@ -376,7 +650,10 @@ export default function ReproductionScreen({ navigation, route }) {
           onPress={() =>
             navigation?.navigate("PigsList", {
               selectMode: true,
-              onPick: (sow) => setSelectedSow(sow),
+              onPick: async (sow) => {
+                setSelectedSow(sow);
+                await persistSelectedSow(sow); // ✅ queda guardada para siguientes aperturas
+              },
             })
           }
         >
@@ -448,8 +725,8 @@ export default function ReproductionScreen({ navigation, route }) {
         ) : dayEvents.length === 0 ? (
           <Text style={{ color: Colors.muted }}>Sin información.</Text>
         ) : (
-          dayEvents.map((e) => (
-            <View key={e.id} style={styles.timelineRow}>
+          dayEvents.map((e, idx) => (
+            <View key={`${e.id}|${idx}`} style={styles.timelineRow}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1 }}>
                 <MaterialCommunityIcons
                   name={
@@ -490,8 +767,8 @@ export default function ReproductionScreen({ navigation, route }) {
             <Text style={[styles.alertText, { color: Colors.ok }]}>Sin alertas por ahora.</Text>
           </View>
         ) : (
-          computedAlerts.map((a) => (
-            <View key={a.key} style={styles.alertRow}>
+          computedAlerts.map((a, idx) => (
+            <View key={`${a.key}|${idx}`} style={styles.alertRow}>
               <MaterialCommunityIcons
                 name={a.level === "danger" ? "alert-octagon" : "alert-circle"}
                 size={18}
