@@ -14,6 +14,15 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { auth, realtimeDb } from "../database";
 import { ref, onValue, set, push, update } from "firebase/database";
 
+// 🔔 NUEVO: Importaciones para notificaciones
+import {
+  scheduleOnce,
+  scheduleRepeating,
+  scheduleEveryNHours,
+  cancelAllNotifications,
+  getScheduled,
+} from "./utils/notifications";
+
 const Colors = {
   green: "#843a3a",
   beige: "#FFF7EA",
@@ -182,6 +191,115 @@ function pctColor(pct, mode = "positive") {
     if (n <= 85) return Colors.warn;
     return Colors.ok;
   }
+}
+
+// 🔔 NUEVO: Componente de panel de notificaciones rápidas
+function NotifQuickPanel() {
+  const [busy, setBusy] = useState(false);
+
+  const programarAlimentacionCada8h = async () => {
+    try {
+      setBusy(true);
+      // Crea 3 notificaciones diarias: 06:00, 14:00, 22:00 (ejemplo)
+      await scheduleEveryNHours({
+        idPrefix: "feed",
+        title: "Alimentación de ganado",
+        body: "Registrar y verificar alimentación.",
+        hours: 8,
+        startHour: 6,
+      });
+      Alert.alert("Listo", "Alimentación programada cada 8 horas.");
+    } catch (e) {
+      Alert.alert("Error", String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const programarVacunacionFecha = async () => {
+    try {
+      setBusy(true);
+      // Próxima vacuna: ajusta la fecha que necesites
+      const when = new Date();
+      when.setDate(when.getDate() + 7);
+      when.setHours(9, 0, 0, 0);
+
+      await scheduleOnce({
+        id: "vacuna_next",
+        title: "Vacunación programada",
+        body: "Toca revisar y aplicar vacunación.",
+        date: when,
+      });
+      Alert.alert("Listo", "Vacunación programada para la fecha indicada.");
+    } catch (e) {
+      Alert.alert("Error", String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const programarRevisionSemanal = async () => {
+    try {
+      setBusy(true);
+      // Lunes 08:00 cada semana (weekday: 1 = Lunes)
+      await scheduleRepeating({
+        id: "revision_semanal",
+        title: "Revisión semanal",
+        body: "Chequeo general de salud e instalaciones.",
+        hour: 8,
+        minute: 0,
+        weekday: 1,
+      });
+      Alert.alert("Listo", "Revisión semanal configurada (Lunes 08:00).");
+    } catch (e) {
+      Alert.alert("Error", String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verProgramadas = async () => {
+    const all = await getScheduled();
+    Alert.alert("Programadas", JSON.stringify(all, null, 2));
+  };
+
+  const cancelarTodo = async () => {
+    await cancelAllNotifications();
+    Alert.alert("Hecho", "Se cancelaron todas las notificaciones.");
+  };
+
+  const Btn = ({ label, onPress }) => (
+    <TouchableOpacity
+      onPress={onPress}
+      disabled={busy}
+      style={{
+        paddingVertical: 10,
+        paddingHorizontal: 14,
+        borderRadius: 12,
+        backgroundColor: "#2e7d32",
+        marginRight: 8,
+        marginBottom: 8,
+      }}
+    >
+      <Text style={{ color: "#fff", fontWeight: "700" }}>{label}</Text>
+    </TouchableOpacity>
+  );
+
+  return (
+    <View style={{ marginTop: 12 }}>
+      <Text style={{ fontSize: 16, fontWeight: "700", marginBottom: 8 }}>
+        Recordatorios rápidos
+      </Text>
+
+      <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+        <Btn label="Alimentación cada 8h" onPress={programarAlimentacionCada8h} />
+        <Btn label="Vacunación (fecha)" onPress={programarVacunacionFecha} />
+        <Btn label="Revisión semanal" onPress={programarRevisionSemanal} />
+        <Btn label="Ver programadas" onPress={verProgramadas} />
+        <Btn label="Cancelar todo" onPress={cancelarTodo} />
+      </View>
+    </View>
+  );
 }
 
 export function ProductivityDashboardScreen() {
@@ -430,6 +548,9 @@ export function ProductivityDashboardScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* 🔔 NUEVO: Panel de notificaciones rápidas */}
+      <NotifQuickPanel />
 
       {/* Resumen ventana */}
       <View style={styles.panel}>

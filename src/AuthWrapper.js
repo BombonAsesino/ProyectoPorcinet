@@ -1,9 +1,14 @@
-
+// src/AuthWrapper.js
 import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { useNavigation } from "@react-navigation/native";
-import { auth } from "../database";
 import { onAuthStateChanged } from "firebase/auth";
+
+// ⚠️ Esta ruta es correcta porque tu carpeta "database" está FUERA de /src
+import { auth } from "../database";
+
+// 🔔 Util de notificaciones (dentro de /src/utils/)
+import { ensureNotificationSetup } from "./utils/notifications";
 
 const Colors = {
   green: "#1E5B3F",
@@ -18,15 +23,22 @@ export default function AuthWrapper({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // 1) Inicializa canal/permisos una sola vez
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
+    ensureNotificationSetup();
+  }, []);
+
+  // 2) Listener de autenticación
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
       setLoading(false);
-      
-      if (!user) {
+
+      if (!u) {
         // Si no hay usuario autenticado, ir al login
         navigation.reset({ index: 0, routes: [{ name: "Login" }] });
       }
+      // Si sí hay usuario, simplemente renderizamos children (mantiene la ruta actual)
     });
 
     return unsubscribe;
@@ -41,10 +53,11 @@ export default function AuthWrapper({ children }) {
   }
 
   if (!user) {
-    return null; // Se redirigirá al login
+    // Se redirige al login con navigation.reset
+    return null;
   }
 
-  return children;
+  return <View style={{ flex: 1 }}>{children}</View>;
 }
 
 const styles = StyleSheet.create({
