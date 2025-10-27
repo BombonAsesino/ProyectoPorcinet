@@ -26,15 +26,6 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/notification-icon.png",
-          "color": "#2e7d32",
-          "defaultChannelDisplayName": "General",
-          "defaultChannelDescription": "Notificaciones de Porcinet (alimentación, vacunación y revisiones)"
-        }
-      ],
       "expo-sqlite"
     ]
   }

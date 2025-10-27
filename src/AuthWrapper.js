@@ -7,8 +7,7 @@ import { onAuthStateChanged } from "firebase/auth";
 // ⚠️ Esta ruta es correcta porque tu carpeta "database" está FUERA de /src
 import { auth } from "../database";
 
-// 🔔 Util de notificaciones (dentro de /src/utils/)
-import { ensureNotificationSetup } from "./utils/notifications";
+
 
 const Colors = {
   green: "#1E5B3F",
@@ -24,9 +23,7 @@ export default function AuthWrapper({ children }) {
   const [loading, setLoading] = useState(true);
 
   // 1) Inicializa canal/permisos una sola vez
-  useEffect(() => {
-    ensureNotificationSetup();
-  }, []);
+ 
 
   // 2) Listener de autenticación
   useEffect(() => {
