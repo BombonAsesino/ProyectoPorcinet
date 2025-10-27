@@ -1,5 +1,5 @@
 // src/PigsListScreen.js
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -130,12 +130,35 @@ async function removeFromQueueForItem(item) {
   }
 }
 
+/* ===== util de filtro local (no toca tu lógica) ===== */
+const normalize = (s = "") =>
+  String(s)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
 export default function PigsListScreen({ navigation, route }) {
   const [items, setItems] = useState([]);
   const [busy, setBusy] = useState(true);
 
   const selectMode = route?.params?.selectMode === true;
   const onPick = route?.params?.onPick;
+
+  // ⬇️ NUEVO: si llegas con un texto de búsqueda, filtramos la lista localmente
+  const initialQuery = route?.params?.initialQuery || "";
+  const visibleItems = useMemo(() => {
+    const q = normalize(initialQuery);
+    if (!q) return items;
+    return items.filter((it) => {
+      const haystack = normalize(
+        `${it.earTag || ""} ${it.name || ""} ${it.status || ""} ${it.parity ?? ""}`
+      );
+      return haystack.includes(q);
+    });
+  }, [items, initialQuery]);
 
   useEffect(() => {
     (async () => {
@@ -235,6 +258,7 @@ export default function PigsListScreen({ navigation, route }) {
           ? (onPick(item), navigation.goBack())
           : navigation.navigate("PigForm", { id: item.id })
       }
+      activeOpacity={0.85}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
         <View style={styles.avatar}>
@@ -248,7 +272,26 @@ export default function PigsListScreen({ navigation, route }) {
           <Text style={styles.sub}>Estado: {item.status} · Partos: {item.parity ?? 0}</Text>
         </View>
 
-        <TouchableOpacity onPress={() => askDelete(item.id)} style={styles.iconBtn}>
+        {/* ⬇️ NUEVO: acceso directo a Salud y crecimiento sin cambiar tu onPress */}
+        <TouchableOpacity
+          onPress={() =>
+            navigation.navigate("HealthAndGrowth", {
+              id: item.id,
+              earTag: item.earTag,
+              name: item.name,
+            })
+          }
+          style={styles.iconBtn}
+          accessibilityLabel="Salud y crecimiento"
+        >
+          <MaterialCommunityIcons name="heart-pulse" size={18} color={Colors.green} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => askDelete(item.id)}
+          style={[styles.iconBtn, { marginLeft: 6 }]}
+          accessibilityLabel="Eliminar cerda"
+        >
           <MaterialCommunityIcons name="trash-can" size={18} color={Colors.green} />
         </TouchableOpacity>
       </View>
@@ -272,10 +315,15 @@ export default function PigsListScreen({ navigation, route }) {
         <ActivityIndicator color={Colors.green} />
       ) : (
         <FlatList
-          data={items}
+          data={visibleItems}  /* ⬅️ ahora usamos la lista filtrada si viene initialQuery */
           keyExtractor={(it) => String(it.id)}
           renderItem={renderItem}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          ListEmptyComponent={
+            <Text style={{ color: Colors.muted, fontWeight: "700" }}>
+              {initialQuery ? "Sin coincidencias para tu búsqueda." : "Aún no tienes cerdas registradas."}
+            </Text>
+          }
         />
       )}
     </View>
@@ -313,6 +361,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
+    borderColor: Colors.border,
   },
   name: { fontWeight: "900", color: Colors.text },
   sub: { fontWeight: "700", color: Colors.muted },

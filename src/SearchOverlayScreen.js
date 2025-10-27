@@ -24,6 +24,9 @@ import {
   endAt as fsEndAt,
   limit as fsLimit,
 } from "firebase/firestore";
+// arriba
+import { searchHealthGlobal } from "./search/healthSearch";
+
 
 // 🔎 búsqueda de cerdas (tu helper)
 import { searchAnimalsGlobal } from "./search/animalsSearch";
@@ -150,6 +153,18 @@ export default function SearchOverlayScreen() {
         }
       }
 
+
+// ===== SALUD / CRECIMIENTO =====
+try {
+  const animalsForNames = []; // si aquí puedes pasar tu lista de cerdas, mejor
+  const health = await searchHealthGlobal(text, animalsForNames);
+  results.push(...health);
+} catch (e) {
+  console.log("health search error:", e?.message || e);
+}
+
+
+
       // ====== ANIMALES / CERDAS ======
       if (enableAnimals) {
         try {
@@ -199,6 +214,9 @@ export default function SearchOverlayScreen() {
     }
   }
 
+
+
+  
   // ===== UI =====
   const headerRight = useMemo(() => {
     if (!q) return null;

@@ -53,6 +53,13 @@ import ManageUsersLite from "./ManageUsersLite";
 // ⬇️ Pantalla modal de búsqueda
 import SearchOverlayScreen from "./SearchOverlayScreen";
 
+// ⬇️ NUEVO: pantalla de Salud y Crecimiento (H19)
+import HealthAndGrowthScreen from "./HealthAndGrowthScreen";
+
+// ⬇️ NUEVO: sync de colas offline de salud/crecimiento
+import * as Network from "expo-network";
+import { syncHealthQueues } from "./scripts/syncHealthQueues";
+
 const Colors = {
   green: "#843a3a",
   beige: "#FFF7EA",
@@ -483,6 +490,8 @@ function ReproStack() {
       <ReproStackNav.Screen name="Reproducción" component={ReproductionScreen} />
       <ReproStackNav.Screen name="PigsList" component={PigsListScreen} options={{ title: "Lista de cerdas" }} />
       <ReproStackNav.Screen name="PigForm" component={PigFormScreen} options={{ title: "Formulario cerda" }} />
+      {/* ⬇️ NUEVO: pantalla de Salud y crecimiento */}
+      <ReproStackNav.Screen name="HealthAndGrowth" component={HealthAndGrowthScreen} options={{ title: "Salud y crecimiento" }} />
     </ReproStackNav.Navigator>
   );
 }
@@ -536,6 +545,20 @@ const RootStack = createNativeStackNavigator();
 export default function HomeApp() {
   const theme = { ...DefaultTheme, colors: { ...DefaultTheme.colors, background: Colors.beige } };
 
+  // ⬇️ NUEVO: al abrir la app, intenta sincronizar colas offline (si hay internet)
+  useEffect(() => {
+    (async () => {
+      try {
+        const net = await Network.getNetworkStateAsync();
+        if (net?.isConnected) {
+          await syncHealthQueues();
+        }
+      } catch (e) {
+        console.log("syncHealthQueues (HomeApp) error:", e?.message || e);
+      }
+    })();
+  }, []);
+
   return (
     <NavigationContainer theme={theme}>
       <RootStack.Navigator
@@ -564,7 +587,7 @@ export default function HomeApp() {
         <RootStack.Screen name="AdminPanel" component={AdminHomeScreen} options={{ title: "Admin" }} />
         <RootStack.Screen name="AdminDashboard" component={AdminDashboardScreen} options={{ title: "Dashboard" }} />
 
-        {/* ⬇️ Nuevo: pantalla modal de búsqueda */}
+        {/* ⬇️ Pantalla modal de búsqueda */}
         <RootStack.Screen
           name="Buscar"
           component={SearchOverlayScreen}
@@ -576,7 +599,7 @@ export default function HomeApp() {
             headerTitleStyle: { fontWeight: "800", fontSize: 18 },
           }}
           initialParams={{
-            // ⬇️ estos params activan la búsqueda de cerdas y costos desde el overlay
+            // params activan la búsqueda de cerdas y costos desde el overlay
             enableAnimals: true,
             enableCosts: true,
           }}
