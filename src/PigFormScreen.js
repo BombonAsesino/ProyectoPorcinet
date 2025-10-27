@@ -37,6 +37,18 @@ const Colors = {
   border: "rgba(0,0,0,0.08)",
 };
 
+/* ========= NUEVO: normalizador para el campo q ========= */
+function normalize(s = "") {
+  return String(s)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+/* ===================================================== */
+
 function parseYMD(s) {
   if (!s) return null;
   const [y, m, d] = s.split("-").map((n) => parseInt(n, 10));
@@ -164,6 +176,11 @@ export default function PigFormScreen({ navigation, route }) {
     if (!validateForm()) return;
 
     const birthDate = parseYMD(birthStr);
+
+    /* ========= NUEVO: calcular qField para el buscador ========= */
+    const qField = normalize(`${earTag} ${name} ${status} ${notes}`);
+    /* ========================================================== */
+
     const payload = {
       uid,
       earTag: earTag.trim(),
@@ -172,6 +189,7 @@ export default function PigFormScreen({ navigation, route }) {
       status: (status || "activa").toLowerCase(),
       parity: Number.isFinite(parseInt(parity, 10)) ? parseInt(parity, 10) : 0,
       notes: notes.trim(),
+      q: qField,                 // ✅ NUEVO (para búsqueda en Firestore)
       updatedAt: serverTimestamp(),
     };
 
@@ -186,6 +204,7 @@ export default function PigFormScreen({ navigation, route }) {
           ...payload,
           updatedAt: new Date().toISOString(),
           birthDate: birthDate ? birthDate.toISOString() : null,
+          q: qField, // ✅ queda listo para cuando sincronice
         };
 
         const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -207,6 +226,7 @@ export default function PigFormScreen({ navigation, route }) {
           status: safePayload.status,
           parity: safePayload.parity,
           notes: safePayload.notes,
+          q: qField, // (opcional en caché)
           createdAt: new Date().toISOString(),
           offline: true,
         });
@@ -233,6 +253,7 @@ export default function PigFormScreen({ navigation, route }) {
           status: payload.status,
           parity: payload.parity,
           notes: payload.notes,
+          q: qField, // (opcional en caché)
           createdAt: new Date().toISOString(),
           offline: false,
         });
@@ -254,6 +275,7 @@ export default function PigFormScreen({ navigation, route }) {
           status: payload.status,
           parity: payload.parity,
           notes: payload.notes,
+          q: qField, // (opcional en caché)
           createdAt: new Date().toISOString(), // usable para ordenar localmente
           offline: false,
         });

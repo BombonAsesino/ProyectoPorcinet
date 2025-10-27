@@ -50,6 +50,9 @@ import AdminDashboardScreen from "./AdminDashboardScreen";
 import PantallaGestionUsuarios from "./PantallaGestionUsuarios";
 import ManageUsersLite from "./ManageUsersLite";
 
+// ⬇️ Pantalla modal de búsqueda
+import SearchOverlayScreen from "./SearchOverlayScreen";
+
 const Colors = {
   green: "#843a3a",
   beige: "#FFF7EA",
@@ -109,13 +112,13 @@ function HomeMenu({ navigation }) {
 
   // === permisos / rol ===
   const [role, setRole] = useState("principal"); // 'principal' | 'subcuenta'
-  const [allowed, setAllowed] = useState(null);  // null => sin restricción (dueño); array => módulos permitidos
+  const [allowed, setAllowed] = useState(null);  // null => sin restricción; array => módulos permitidos
 
   // Modal madres
   const [editSowsVisible, setEditSowsVisible] = useState(false);
   const [tempSows, setTempSows] = useState("");
 
-  // 0) Cargar rol + permisos (NO toca tu lógica existente)
+  // 0) Cargar rol + permisos
   useEffect(() => {
     const u = auth.currentUser;
     if (!u) return;
@@ -264,14 +267,10 @@ function HomeMenu({ navigation }) {
         <View style={styles.topGreen}>
           <View style={styles.rowChips}>
             <StatChip title="Cerdos totales" value={String(herd)} />
-           <StatChip
-  title="Productividad"
-  value={productivityPct !== null && productivityPct !== undefined
-    ? `${productivityPct}%`
-    : `-- %`
-  }
-/>
-
+            <StatChip
+              title="Productividad"
+              value={productivityPct !== null && productivityPct !== undefined ? `${productivityPct}%` : `-- %`}
+            />
             <StatChip title="Madres" value={String(sows)} onPress={openEditSows} />
           </View>
         </View>
@@ -324,7 +323,7 @@ function HomeMenu({ navigation }) {
           )}
         </View>
 
-        {/* Botón IA (si quieres limitarlo, cambia a can('analytics')) */}
+        {/* Botón IA */}
         <Pressable style={styles.aiBtn} onPress={() => navigation.navigate("AsistenteIAWelcome")}>
           <Text style={styles.aiBtnText}>Asistente IA</Text>
         </Pressable>
@@ -488,6 +487,27 @@ function ReproStack() {
   );
 }
 
+/* ====== Header "Mi Granja" con icono de búsqueda ====== */
+function TitleWithSearch({ navigation }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+      <Text style={{ color: Colors.white, fontWeight: "800", fontSize: 22 }}>Mi Granja</Text>
+      <TouchableOpacity
+        onPress={() =>
+          navigation.navigate("Buscar", {
+            // ⬇️ estos flags permiten que el overlay busque cerdas y costos
+            enableAnimals: true,
+            enableCosts: true,
+          })
+        }
+        style={{ padding: 6 }}
+      >
+        <MaterialCommunityIcons name="magnify" size={24} color={Colors.white} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 /* ====== Stack interno Bienvenida -> Tabs ====== */
 const InnerStack = createNativeStackNavigator();
 function TabsFlow() {
@@ -497,14 +517,15 @@ function TabsFlow() {
       <InnerStack.Screen
         name="Tabs"
         component={AppTabs}
-        options={{
+        options={({ navigation }) => ({
           headerShown: true,
-          title: "Mi Granja",
+          // Título con icono de búsqueda al lado (estilo Facebook)
+          headerTitle: () => <TitleWithSearch navigation={navigation} />,
           headerStyle: { backgroundColor: Colors.green },
           headerTintColor: Colors.white,
           headerTitleStyle: { fontWeight: "800", fontSize: 22 },
           headerTitleAlign: "center",
-        }}
+        })}
       />
     </InnerStack.Navigator>
   );
@@ -542,6 +563,24 @@ export default function HomeApp() {
         {/* Admin */}
         <RootStack.Screen name="AdminPanel" component={AdminHomeScreen} options={{ title: "Admin" }} />
         <RootStack.Screen name="AdminDashboard" component={AdminDashboardScreen} options={{ title: "Dashboard" }} />
+
+        {/* ⬇️ Nuevo: pantalla modal de búsqueda */}
+        <RootStack.Screen
+          name="Buscar"
+          component={SearchOverlayScreen}
+          options={{
+            title: "Buscar",
+            presentation: "modal",
+            headerStyle: { backgroundColor: Colors.green },
+            headerTintColor: Colors.white,
+            headerTitleStyle: { fontWeight: "800", fontSize: 18 },
+          }}
+          initialParams={{
+            // ⬇️ estos params activan la búsqueda de cerdas y costos desde el overlay
+            enableAnimals: true,
+            enableCosts: true,
+          }}
+        />
       </RootStack.Navigator>
     </NavigationContainer>
   );
