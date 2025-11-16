@@ -19,6 +19,9 @@ import {
   collection,
   serverTimestamp,
   updateDoc,
+  query,        // ← añadido
+  where,        // ← añadido
+  getDocs,      // ← añadido
 } from "firebase/firestore";
 
 /* ✅ Soporte offline */
@@ -37,7 +40,7 @@ const Colors = {
   border: "rgba(0,0,0,0.08)",
 };
 
-/* ========= NUEVO: normalizador para el campo q ========= */
+/* ========= normalizador para el campo q ========= */
 function normalize(s = "") {
   return String(s)
     .toLowerCase()
@@ -96,6 +99,84 @@ async function upsertCacheItem(item) {
   if (!updated) next.unshift(item);
   await writeCache(next);
 }
+
+/* ========= NUEVO: verificación de duplicados ========= */
+async function checkDuplicates({ uid, earTag, name, currentId = null }) {
+  const ear = String(earTag || "").trim().toLowerCase();
+  const nam = String(name || "").trim().toLowerCase();
+  if (!ear && !nam) return null;
+
+  let dupEarLocal = false;
+  let dupNameLocal = false;
+
+  // 1) Buscar en caché local
+  try {
+    const cache = await readCache();
+    for (const it of cache) {
+      const sameCloud = it.cloudId && currentId && String(it.cloudId) === String(currentId);
+      if (sameCloud) continue; // excluir el mismo doc cuando editas
+
+      const sameLocalOnly =
+        !it.cloudId && currentId && String(it.localId || "") === String(currentId);
+      if (sameLocalOnly) continue;
+
+      const itEar = String(it.earTag || "").trim().toLowerCase();
+      const itName = String(it.name || "").trim().toLowerCase();
+      if (ear && itEar === ear) dupEarLocal = true;
+      if (nam && itName === nam) dupNameLocal = true;
+      if (dupEarLocal && dupNameLocal) break;
+    }
+  } catch {}
+
+  let dupEarCloud = false;
+  let dupNameCloud = false;
+
+  // 2) Si hay red, verificar en Firestore con igualdad exacta (mismo uid)
+  try {
+    const net = await Network.getNetworkStateAsync();
+    if (net?.isConnected) {
+      // arete
+      if (ear) {
+        const q1 = query(
+          collection(db, "animals"),
+          where("uid", "==", uid),
+          where("earTag", "==", earTag.trim())
+        );
+        const snap1 = await getDocs(q1);
+        snap1.forEach((d) => {
+          if (!currentId || d.id !== currentId) dupEarCloud = true;
+        });
+      }
+      // nombre
+      if (nam) {
+        const q2 = query(
+          collection(db, "animals"),
+          where("uid", "==", uid),
+          where("name", "==", name.trim())
+        );
+        const snap2 = await getDocs(q2);
+        snap2.forEach((d) => {
+          if (!currentId || d.id !== currentId) dupNameCloud = true;
+        });
+      }
+    }
+  } catch {}
+
+  const dupEar = dupEarLocal || dupEarCloud;
+  const dupName = dupNameLocal || dupNameCloud;
+
+  if (dupEar && dupName) {
+    return "No se puede guardar: ya existe una cerda con **ese arete y ese nombre**.";
+  }
+  if (dupEar) {
+    return "No se puede guardar: ya existe una cerda con **ese arete**.";
+  }
+  if (dupName) {
+    return "No se puede guardar: ya existe una cerda con **ese nombre**.";
+  }
+  return null;
+}
+/* ======================================================= */
 
 export default function PigFormScreen({ navigation, route }) {
   const id = route?.params?.id || null;
@@ -175,11 +256,23 @@ export default function PigFormScreen({ navigation, route }) {
 
     if (!validateForm()) return;
 
+    // ⬇️ NUEVO: Validación de duplicados (local + Firestore si hay red)
+    const dupMsg = await checkDuplicates({
+      uid,
+      earTag,
+      name,
+      currentId: id || null,
+    });
+    if (dupMsg) {
+      Alert.alert("Duplicado", dupMsg);
+      return;
+    }
+
     const birthDate = parseYMD(birthStr);
 
-    /* ========= NUEVO: calcular qField para el buscador ========= */
+    /* ========= calcular qField para el buscador ========= */
     const qField = normalize(`${earTag} ${name} ${status} ${notes}`);
-    /* ========================================================== */
+    /* =================================================== */
 
     const payload = {
       uid,
@@ -189,7 +282,7 @@ export default function PigFormScreen({ navigation, route }) {
       status: (status || "activa").toLowerCase(),
       parity: Number.isFinite(parseInt(parity, 10)) ? parseInt(parity, 10) : 0,
       notes: notes.trim(),
-      q: qField,                 // ✅ NUEVO (para búsqueda en Firestore)
+      q: qField,                 // ✅ para búsqueda en Firestore
       updatedAt: serverTimestamp(),
     };
 
@@ -204,7 +297,7 @@ export default function PigFormScreen({ navigation, route }) {
           ...payload,
           updatedAt: new Date().toISOString(),
           birthDate: birthDate ? birthDate.toISOString() : null,
-          q: qField, // ✅ queda listo para cuando sincronice
+          q: qField,
         };
 
         const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -226,7 +319,7 @@ export default function PigFormScreen({ navigation, route }) {
           status: safePayload.status,
           parity: safePayload.parity,
           notes: safePayload.notes,
-          q: qField, // (opcional en caché)
+          q: qField,
           createdAt: new Date().toISOString(),
           offline: true,
         });
@@ -243,7 +336,7 @@ export default function PigFormScreen({ navigation, route }) {
       if (id) {
         await updateDoc(doc(db, "animals", id), payload);
 
-        // ✅ espejo en caché para persistencia post-reinicio
+        // espejo en caché
         await addToLocalCache({
           cloudId: id,
           uid,
@@ -253,7 +346,7 @@ export default function PigFormScreen({ navigation, route }) {
           status: payload.status,
           parity: payload.parity,
           notes: payload.notes,
-          q: qField, // (opcional en caché)
+          q: qField,
           createdAt: new Date().toISOString(),
           offline: false,
         });
@@ -265,7 +358,7 @@ export default function PigFormScreen({ navigation, route }) {
           createdAt: serverTimestamp(),
         });
 
-        // ✅ espejo en caché con cloudId del doc creado
+        // espejo en caché con cloudId del doc creado
         await addToLocalCache({
           cloudId: ref.id,
           uid,
@@ -275,8 +368,8 @@ export default function PigFormScreen({ navigation, route }) {
           status: payload.status,
           parity: payload.parity,
           notes: payload.notes,
-          q: qField, // (opcional en caché)
-          createdAt: new Date().toISOString(), // usable para ordenar localmente
+          q: qField,
+          createdAt: new Date().toISOString(),
           offline: false,
         });
 

@@ -74,7 +74,7 @@ async function createBackup(uid) {
   }
 
   const costsSanitized = costs.map((c) => ({
-    ...c,
+    ...c, // ⬅ aquí viajan también foto y otros campos
     date: (() => {
       const d = safeDate(c.date);
       return Number.isFinite(d?.getTime?.()) ? d.toISOString() : null;
@@ -114,6 +114,7 @@ async function readBackupDoc(backupId) {
   return JSON.parse(String(data.payload || "{}"));
 }
 
+/* ✅ Ahora restauramos TODOS los campos extra (incluida la foto) */
 async function restoreCosts(uid, items = []) {
   if (!Array.isArray(items)) return;
   const batch = writeBatch(db);
@@ -122,6 +123,28 @@ async function restoreCosts(uid, items = []) {
     const date = safeDate(it.date);
     const mk = it.monthKey || monthKeyFrom(date);
     const id = it.id ?? `${uid}_${date.getTime()}`;
+
+    // Copiamos todos los campos extra del backup
+    const extra = { ...it };
+
+    // Quitamos los que vamos a controlar nosotros
+    delete extra.id;
+    delete extra.uid;
+    delete extra.createdAt;
+    delete extra.updatedAt;
+    delete extra.date;
+    delete extra.monthKey;
+    delete extra.amount;
+    delete extra.category;
+    delete extra.note;
+
+    // Por si en algún momento se guardó con otro nombre
+    if (extra.photoURI && !extra.photoUri) {
+      extra.photoUri = extra.photoURI;
+    }
+    if (extra.imageUri && !extra.photoUri) {
+      extra.photoUri = extra.imageUri;
+    }
 
     const clean = {
       uid,
@@ -132,6 +155,7 @@ async function restoreCosts(uid, items = []) {
       monthKey: mk,
       createdAt: serverTimestamp(),
       updatedAt: null,
+      ...extra, // ⬅ aquí entra photoUri y cualquier otro campo personalizado
     };
 
     batch.set(doc(collection(db, "costs"), id), clean);
@@ -157,11 +181,9 @@ export function BackupScreen({ navigation }) {
       where("uid", "==", u.uid),
       orderBy("createdAt", "desc")
     );
-   
+
     const off = onSnapshot(qHist, (snap) => {
       const arr = [];
-
-      
       snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
       setLast(arr[0] ?? null);
     });
@@ -189,7 +211,8 @@ export function BackupScreen({ navigation }) {
   const doRestoreLast = async () => {
     const u = auth.currentUser;
     if (!u) return Alert.alert("Sesión", "Debes iniciar sesión.");
-    if (!last?.id) return Alert.alert("Sin respaldo", "Aún no tienes respaldos.");
+    if (!last?.id)
+      return Alert.alert("Sin respaldo", "Aún no tienes respaldos.");
 
     try {
       setBusy(true);
@@ -223,8 +246,14 @@ export function BackupScreen({ navigation }) {
           onPress={doBackup}
           disabled={busy}
         >
-          <MaterialCommunityIcons name="cloud-upload" size={18} color={Colors.white} />
-          <Text style={styles.btnText}>{busy ? "Procesando…" : "Crear respaldo"}</Text>
+          <MaterialCommunityIcons
+            name="cloud-upload"
+            size={18}
+            color={Colors.white}
+          />
+          <Text style={styles.btnText}>
+            {busy ? "Procesando…" : "Crear respaldo"}
+          </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -232,8 +261,14 @@ export function BackupScreen({ navigation }) {
           onPress={doRestoreLast}
           disabled={busy}
         >
-          <MaterialCommunityIcons name="cloud-download" size={18} color={Colors.green} />
-          <Text style={styles.btnLightText}>Restaurar último respaldo</Text>
+          <MaterialCommunityIcons
+            name="cloud-download"
+            size={18}
+            color={Colors.green}
+          />
+          <Text style={styles.btnLightText}>
+            Restaurar último respaldo
+          </Text>
         </TouchableOpacity>
 
         <View style={{ marginTop: 8 }}>
@@ -245,7 +280,8 @@ export function BackupScreen({ navigation }) {
           <Text style={styles.smallLabel}>Último respaldo</Text>
           {last ? (
             <Text style={styles.smallText}>
-              {fmt(last.createdAt)} · {Math.round((last.sizeBytes ?? 0) / 1024)} KB
+              {fmt(last.createdAt)} ·{" "}
+              {Math.round((last.sizeBytes ?? 0) / 1024)} KB
             </Text>
           ) : (
             <Text style={styles.smallText}>—</Text>
@@ -269,8 +305,14 @@ export function BackupScreen({ navigation }) {
           style={[styles.rowBtn, { alignSelf: "flex-start", marginTop: 10 }]}
           onPress={() => navigation?.navigate("Historial")}
         >
-          <MaterialCommunityIcons name="history" size={18} color={Colors.white} />
-          <Text style={styles.rowBtnText}>Abrir historial de respaldos</Text>
+          <MaterialCommunityIcons
+            name="history"
+            size={18}
+            color={Colors.white}
+          />
+          <Text style={styles.rowBtnText}>
+            Abrir historial de respaldos
+          </Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -319,7 +361,10 @@ export function BackupHistoryScreen() {
         throw new Error("Respaldo inválido o de otro usuario.");
       }
       await restoreCosts(u.uid, payload.data.costs ?? []);
-      Alert.alert("Listo", "Se restauraron los costos del respaldo seleccionado.");
+      Alert.alert(
+        "Listo",
+        "Se restauraron los costos del respaldo seleccionado."
+      );
     } catch (e) {
       console.log("restore one error", e);
       Alert.alert("Error", String(e?.message ?? e));
@@ -333,11 +378,19 @@ export function BackupHistoryScreen() {
       <View style={{ flex: 1 }}>
         <Text style={styles.rowTitle}>{fmt(item.createdAt)}</Text>
         <Text style={styles.rowSub}>
-          {Math.round((item.sizeBytes ?? 0) / 1024)} KB · {item.collections?.join(", ")}
+          {Math.round((item.sizeBytes ?? 0) / 1024)} KB ·{" "}
+          {item.collections?.join(", ")}
         </Text>
       </View>
-      <TouchableOpacity style={styles.rowBtn} onPress={() => restoreOne(item)}>
-        <MaterialCommunityIcons name="cloud-download" size={18} color={Colors.white} />
+      <TouchableOpacity
+        style={styles.rowBtn}
+        onPress={() => restoreOne(item)}
+      >
+        <MaterialCommunityIcons
+          name="cloud-download"
+          size={18}
+          color={Colors.white}
+        />
         <Text style={styles.rowBtnText}>Restaurar</Text>
       </TouchableOpacity>
     </View>
@@ -354,7 +407,9 @@ export function BackupHistoryScreen() {
             data={items}
             keyExtractor={(it) => it.id}
             renderItem={renderItem}
-            ListEmptyComponent={<Text style={styles.smallText}>Aún no tienes respaldos.</Text>}
+            ListEmptyComponent={
+              <Text style={styles.smallText}>Aún no tienes respaldos.</Text>
+            }
             ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           />
         )}
@@ -375,7 +430,12 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 14,
   },
-  title: { fontSize: 16, fontWeight: "900", color: Colors.text, marginBottom: 8 },
+  title: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: Colors.text,
+    marginBottom: 8,
+  },
   btn: {
     backgroundColor: Colors.green,
     borderRadius: 10,

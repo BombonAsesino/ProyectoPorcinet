@@ -1,5 +1,5 @@
 // src/HealthAndGrowthScreen.js
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -9,6 +9,8 @@ import {
   TouchableOpacity,
   Alert,
   Dimensions,
+  AppState,
+  Platform,
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { auth, db } from "../database";
@@ -49,9 +51,10 @@ function parseYMD(s) {
 function isValidHM(s) {
   return /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(s || "").trim());
 }
-function parseHM(s) {
-  const [hh, mm] = s.split(":").map((n) => parseInt(n, 10));
-  return { hh, mm };
+function to24h(h, ampm) {
+  const hh = parseInt(h, 10);
+  if (ampm === "AM") return hh === 12 ? 0 : hh;
+  return hh === 12 ? 12 : hh + 12;
 }
 
 /* ================= Claves de caché/cola ================= */
@@ -60,105 +63,81 @@ const QUEUE_KEY = "health_offline_queue_v1";
 const alertKey = (animalId) => `health_alerts_v1:${animalId}`;
 const notifiedOnceKey = "notif_perm_asked_v1";
 
-/* ================= Gráfico vistoso ================= */
-function PrettyWeightChart({ data = [], title = "Evolución de peso" }) {
+/* ================= Gráfico ================= */
+function PrettyWeightChart({ data = [] }) {
   const screenW = Dimensions.get("window").width;
   const WIDTH = Math.min(screenW - 24, 680);
-  const HEIGHT = 260;
+  const HEIGHT = 250;
 
   const series = [...data]
-    .filter((d) => Number.isFinite(d.kg))
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
+    .filter((d) => d && Number.isFinite(Number(d.kg)) && d.date)
+    .map((d) => ({ date: new Date(d.date), kg: Number(d.kg) }))
+    .sort((a, b) => a.date - b.date);
 
-  const labels = series.map((d) =>
-    new Date(d.date).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" })
-  );
-  const values = series.map((d) => Number(d.kg));
-
-  const avgSeries = values.map((_, i) => {
-    const a = Math.max(0, i - 1);
-    const b = Math.min(values.length - 1, i + 1);
-    const slice = values.slice(a, b + 1);
-    return Math.round((slice.reduce((x, y) => x + y, 0) / slice.length) * 10) / 10;
-  });
-
-  const chartConfig = {
-    backgroundGradientFrom: "#ffffff",
-    backgroundGradientTo: "#ffffff",
-    decimalPlaces: 1,
-    color: (o = 1) => `rgba(15,23,42,${o})`,
-    labelColor: (o = 1) => `rgba(107,114,128,${o})`,
-    propsForDots: { r: "4", strokeWidth: "2", stroke: "#843a3a" },
-    propsForBackgroundLines: { strokeDasharray: "4 8", stroke: "rgba(0,0,0,0.08)" },
-  };
-  const lineMain = (o = 1) => `rgba(132,58,58,${o})`;
-  const lineAvg = (o = 1) => `rgba(37,99,235,${o})`;
-
-  if (values.length < 2) {
+  if (series.length < 2) {
     return (
       <View style={chartCard.container}>
-        <Text style={chartCard.title}>{title}</Text>
+        <Text style={chartCard.title}>Evolución de peso</Text>
         <Text style={{ color: Colors.muted, fontWeight: "700" }}>
-          Aún no hay suficientes pesos para graficar (necesitas 2+ registros).
+          Registra al menos dos pesos para ver la gráfica.
         </Text>
       </View>
     );
   }
 
+  const labels = series.map((d) =>
+    d.date.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" })
+  );
+  const values = series.map((d) => d.kg);
+
+  // Métricas solicitadas
+  const minPeso = Math.min(...values);
+  const maxPeso = Math.max(...values);
+  const gananciaTotal = values[values.length - 1] - values[0];
+
+  const chartConfig = {
+    backgroundGradientFrom: "#fff",
+    backgroundGradientTo: "#fff",
+    color: (o = 1) => `rgba(132,58,58,${o})`,
+    labelColor: (o = 1) => `rgba(107,114,128,${o})`,
+    propsForDots: { r: "4", strokeWidth: "2", stroke: "#843a3a" },
+    propsForBackgroundLines: { strokeDasharray: "4 8", stroke: "rgba(0,0,0,0.08)" },
+  };
+
   return (
     <View style={chartCard.container}>
-      <Text style={chartCard.title}>{title}</Text>
+      <Text style={chartCard.title}>Evolución de peso</Text>
 
       <View style={chartCard.metricsRow}>
-        <MetricChip label="Mín." value={`${Math.min(...values)} kg`} bg="#FFF7EA" />
-        <MetricChip
-          label="Prom."
-          value={`${Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10} kg`}
-          bg="#F6FAFF"
-        />
-        <MetricChip label="Máx." value={`${Math.max(...values)} kg`} bg="#FFF5F6" />
+        <MetricChip label="Peso mínimo" value={`${minPeso.toFixed(1)} kg`} bg="#F6FAFF" />
+        <MetricChip label="Ganancia total" value={`${gananciaTotal.toFixed(1)} kg`} bg="#EFFFF3" />
+        <MetricChip label="Peso máximo" value={`${maxPeso.toFixed(1)} kg`} bg="#FFF6F0" />
       </View>
 
       <LineChart
-        data={{
-          labels,
-          datasets: [
-            { data: values, color: lineMain, strokeWidth: 3, withDots: true },
-            { data: avgSeries, color: lineAvg, strokeWidth: 2, withDots: false },
-          ],
-          legend: [],
-        }}
+        data={{ labels, datasets: [{ data: values }] }}
         width={WIDTH}
         height={HEIGHT}
         yAxisSuffix=" kg"
-        chartConfig={chartConfig}
         bezier
-        withShadow
-        segments={4}
+        chartConfig={chartConfig}
         style={{ borderRadius: 14 }}
-        formatXLabel={(l, i) => (labels.length > 8 && i % 2 ? "" : l)}
       />
-
-      <View style={chartCard.legendRow}>
-        <LegendDot color={lineMain()} label="Peso" />
-        <LegendDot color={lineAvg()} label="Promedio móvil" />
-      </View>
     </View>
   );
 }
 function MetricChip({ label, value, bg }) {
   return (
-    <View style={{ backgroundColor: bg, borderWidth: 1, borderColor: "rgba(0,0,0,0.08)", borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 }}>
-      <Text style={{ fontSize: 11, fontWeight: "900", color: Colors.muted }}>{label}</Text>
-      <Text style={{ fontWeight: "900", color: Colors.text }}>{value}</Text>
-    </View>
-  );
-}
-function LegendDot({ color, label }) {
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-      <View style={{ width: 10, height: 10, borderRadius: 999, backgroundColor: color }} />
+    <View
+      style={{
+        backgroundColor: bg,
+        borderRadius: 10,
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+      }}
+    >
       <Text style={{ fontWeight: "800", color: Colors.muted }}>{label}</Text>
+      <Text style={{ fontWeight: "900", color: Colors.text }}>{value}</Text>
     </View>
   );
 }
@@ -168,55 +147,50 @@ const chartCard = {
     borderRadius: 16,
     borderWidth: 1,
     borderColor: "rgba(0,0,0,0.08)",
-    paddingVertical: 12,
-    paddingHorizontal: 10,
+    padding: 12,
     marginTop: 10,
   },
   title: { fontWeight: "900", color: Colors.text, marginBottom: 8 },
   metricsRow: { flexDirection: "row", gap: 8, marginBottom: 6, flexWrap: "wrap" },
-  legendRow: { marginTop: 8, flexDirection: "row", gap: 16, alignItems: "center", justifyContent: "flex-end" },
 };
 
-/* ================= Pantalla ================= */
+/* ================= Pantalla principal ================= */
 export default function HealthAndGrowthScreen({ route }) {
   const animalId = route?.params?.id;
   const earTag = route?.params?.earTag || "";
   const name = route?.params?.name || "";
 
-  // Peso
+  // Estados principales
+  const [weights, setWeights] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [feeding, setFeeding] = useState([]);
+  const [reminders, setReminders] = useState([]);
+
   const [wDate, setWDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [wKg, setWKg] = useState("");
 
-  // Evento sanitario
   const [eDate, setEDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [eType, setEType] = useState("vacuna"); // vacuna | tratamiento | sintoma
+  const [eType, setEType] = useState("vacuna");
   const [eDesc, setEDesc] = useState("");
 
-  // Alimentación
   const [fDate, setFDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [fKg, setFKg] = useState("");
   const [fCost, setFCost] = useState("");
   const [fNote, setFNote] = useState("");
 
-  // Recordatorios
   const [rDate, setRDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [rTime, setRTime] = useState("08:00");
-  const [rType, setRType] = useState("alimentación"); // alimentación | vacuna | revisión
+  const [rAMPM, setRAMPM] = useState("AM");
+  const [rType, setRType] = useState("alimentación");
   const [rMsg, setRMsg] = useState("");
-  const [reminders, setReminders] = useState([]); // [{id,title,date,time,type,message}]
 
-  // Estados datos
-  const [weights, setWeights] = useState([]);     // [{date, kg}]
-  const [events, setEvents] = useState([]);       // [{date, type, desc}]
-  const [feeding, setFeeding] = useState([]);     // [{date, kg, cost, note}]
+  const appState = useRef(AppState.currentState);
+  const tickerRef = useRef(null);
 
-  /* ---------- permisos de notificación (1 sola vez) ---------- */
+  /* ---------- Permisos y handler de notificación ---------- */
   useEffect(() => {
     (async () => {
       try {
-        const asked = await AsyncStorage.getItem(notifiedOnceKey);
-        if (asked) return;
-
         Notifications.setNotificationHandler({
           handleNotification: async () => ({
             shouldShowAlert: true,
@@ -225,8 +199,20 @@ export default function HealthAndGrowthScreen({ route }) {
           }),
         });
 
+        if (Platform.OS === "android") {
+          await Notifications.setNotificationChannelAsync("porcinet-reminders", {
+            name: "Recordatorios",
+            importance: Notifications.AndroidImportance.HIGH,
+            sound: "default",
+            vibrationPattern: [0, 250, 250, 250],
+            bypassDnd: false,
+            lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+          });
+        }
+
+        const asked = await AsyncStorage.getItem(notifiedOnceKey);
         const settings = await Notifications.getPermissionsAsync();
-        if (!settings.granted) {
+        if (!settings.granted && !asked) {
           await Notifications.requestPermissionsAsync();
         }
         await AsyncStorage.setItem(notifiedOnceKey, "1");
@@ -251,7 +237,20 @@ export default function HealthAndGrowthScreen({ route }) {
   };
   const writeCache = async (next) => {
     try {
-      await AsyncStorage.setItem(cacheKey(animalId), JSON.stringify(next));
+      const safe = {
+        weights: Array.isArray(next.weights) ? next.weights : [],
+        events: Array.isArray(next.events) ? next.events : [],
+        feeding: Array.isArray(next.feeding) ? next.feeding : [],
+      };
+      if (
+        safe.weights.length === 0 &&
+        safe.events.length === 0 &&
+        safe.feeding.length === 0
+      ) {
+        await AsyncStorage.removeItem(cacheKey(animalId));
+      } else {
+        await AsyncStorage.setItem(cacheKey(animalId), JSON.stringify(safe));
+      }
     } catch {}
   };
   const enqueue = async (record) => {
@@ -279,7 +278,7 @@ export default function HealthAndGrowthScreen({ route }) {
           await addDoc(collection(db, "health"), {
             uid,
             animalId: q.animalId,
-            type: q.type,         // weight | vacuna | tratamiento | sintoma | feeding
+            type: q.type, // weight | vacuna | tratamiento | sintoma | feeding
             date: parseYMD(q.date),
             valueKg: q.valueKg ?? null,
             description: q.description ?? null,
@@ -301,7 +300,7 @@ export default function HealthAndGrowthScreen({ route }) {
     (async () => {
       if (!animalId) return;
 
-      // 1) Caché
+      // 1) Caché local
       const local = await readCache();
       setWeights(local.weights);
       setEvents(local.events);
@@ -315,14 +314,13 @@ export default function HealthAndGrowthScreen({ route }) {
         setReminders([]);
       }
 
-      // 3) Sincronizar cola
+      // 3) Sincronizar cola si hay red
       await trySyncQueue();
 
-      // 4) Firestore (si hay red)
+      // 4) Cargar de Firestore (si hay red y user)
       const uid = auth.currentUser?.uid;
-      if (!uid) return;
       const net = await Network.getNetworkStateAsync();
-      if (!net?.isConnected) return;
+      if (!uid || !net?.isConnected) return;
 
       // Pesos
       const qW = query(
@@ -385,16 +383,77 @@ export default function HealthAndGrowthScreen({ route }) {
     })();
   }, [animalId]);
 
-  /* ---------- guardar peso ---------- */
+  /* ---------- Ticker foreground (respaldo Expo Go) ---------- */
+  useEffect(() => {
+    const checkDue = async () => {
+      try {
+        const raw = await AsyncStorage.getItem(alertKey(animalId));
+        const list = raw ? JSON.parse(raw) : [];
+        if (list.length === 0) return;
+
+        const now = Date.now();
+        const remaining = [];
+        let changed = false;
+
+        for (const r of list) {
+          if (typeof r.dueAt === "number" && r.dueAt <= now) {
+            if (!r.delivered) {
+              try {
+                await Notifications.presentNotificationAsync({
+                  title: r.title,
+                  body: r.message,
+                });
+              } catch {}
+              r.delivered = true;
+              r.deliveredAt = new Date().toISOString();
+              changed = true;
+            }
+          }
+          remaining.push(r);
+        }
+
+        if (changed) {
+          setReminders(remaining);
+          await AsyncStorage.setItem(alertKey(animalId), JSON.stringify(remaining));
+        }
+      } catch {}
+    };
+
+    tickerRef.current = setInterval(checkDue, 15000);
+    const sub = AppState.addEventListener("change", (state) => {
+      if (appState.current.match(/inactive|background/) && state === "active") {
+        checkDue();
+      }
+      appState.current = state;
+    });
+
+    return () => {
+      if (tickerRef.current) clearInterval(tickerRef.current);
+      sub.remove();
+    };
+  }, [animalId]);
+
+  /* ---------- Guardar Peso ---------- */
   const saveWeight = async () => {
     if (!isValidYMD(wDate)) return Alert.alert("Fecha", "Usa formato YYYY-MM-DD.");
     const kg = Number(wKg);
     if (!Number.isFinite(kg) || kg <= 0) return Alert.alert("Peso", "Ingresa un peso válido (>0).");
 
+    // ❗Regla: no permitir mismo día/mes/año ya registrado
+    const already = weights.some((w) => String(w.date) === String(wDate));
+    if (already) {
+      return Alert.alert(
+        "Fecha duplicada",
+        "Ya existe un registro de peso para este mismo día. Cambia la fecha o edita el registro existente."
+      );
+    }
+
     const uid = auth.currentUser?.uid;
     const net = await Network.getNetworkStateAsync();
 
-    const nextW = [...weights, { date: wDate, kg }].sort((a, b) => a.date.localeCompare(b.date));
+    const nextW = [...weights, { date: wDate, kg }].sort((a, b) =>
+      String(a.date).localeCompare(String(b.date))
+    );
     setWeights(nextW);
     await writeCache({ weights: nextW, events, feeding });
 
@@ -419,7 +478,7 @@ export default function HealthAndGrowthScreen({ route }) {
     Alert.alert("OK", "Peso guardado.");
   };
 
-  /* ---------- guardar evento ---------- */
+  /* ---------- Guardar Evento ---------- */
   const saveEvent = async () => {
     if (!isValidYMD(eDate)) return Alert.alert("Fecha", "Usa formato YYYY-MM-DD.");
     if (!eType) return Alert.alert("Tipo", "Selecciona un tipo.");
@@ -453,7 +512,7 @@ export default function HealthAndGrowthScreen({ route }) {
     Alert.alert("OK", "Evento guardado.");
   };
 
-  /* ---------- guardar alimentación ---------- */
+  /* ---------- Guardar Alimentación ---------- */
   const saveFeeding = async () => {
     if (!isValidYMD(fDate)) return Alert.alert("Fecha", "Usa formato YYYY-MM-DD.");
     const kg = Number(fKg);
@@ -507,14 +566,18 @@ export default function HealthAndGrowthScreen({ route }) {
     Alert.alert("OK", "Alimentación guardada.");
   };
 
-  /* ---------- programar recordatorio (notificación local) ---------- */
+  /* ---------- Programar recordatorio (exacto a la hora establecida) ---------- */
   const scheduleReminder = async () => {
     if (!isValidYMD(rDate)) return Alert.alert("Fecha", "Usa formato YYYY-MM-DD.");
-    if (!isValidHM(rTime)) return Alert.alert("Hora", "Usa formato HH:MM (24h).");
+    if (!isValidHM(rTime)) return Alert.alert("Hora", "Usa formato HH:MM (ej. 08:00).");
 
-    const { hh, mm } = parseHM(rTime);
+    const [hmH, hmM] = rTime.split(":");
+    const hh24 = to24h(hmH, rAMPM);
+    const mm = parseInt(hmM, 10);
+
     const when = parseYMD(rDate);
-    when.setHours(hh, mm, 0, 0);
+    when.setSeconds(0, 0);
+    when.setHours(hh24, mm, 0, 0);
 
     if (when.getTime() <= Date.now()) {
       return Alert.alert("Horario", "Elige una fecha/hora futura.");
@@ -529,38 +592,103 @@ export default function HealthAndGrowthScreen({ route }) {
         ? `Aplicar vacuna programada a la cerda #${earTag}`
         : `Realizar revisión sanitaria a la cerda #${earTag}`);
 
+    let nativeId = null;
     try {
-      const id = await Notifications.scheduleNotificationAsync({
-        content: { title, body },
-        trigger: when, // fecha/hora exacta
+      nativeId = await Notifications.scheduleNotificationAsync({
+        content: { title, body, sound: "default" },
+        trigger: when,
       });
-
-      const item = {
-        id,
-        title,
-        message: body,
-        type: rType,
-        date: rDate,
-        time: rTime,
-      };
-      const next = [item, ...reminders];
-      setReminders(next);
-      await AsyncStorage.setItem(alertKey(animalId), JSON.stringify(next));
-
-      Alert.alert("OK", "Recordatorio programado.");
-      setRMsg("");
-    } catch (e) {
-      Alert.alert("Error", "No se pudo programar la notificación.");
+    } catch {
+      nativeId = null;
     }
-  };
 
-  const cancelReminder = async (id) => {
-    try {
-      await Notifications.cancelScheduledNotificationAsync(id);
-    } catch {}
-    const next = reminders.filter((r) => r.id !== id);
+    const item = {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      nativeId,
+      title,
+      message: body,
+      type: rType,
+      date: rDate,
+      time: rTime,
+      ampm: rAMPM,
+      dueAt: when.getTime(),
+      delivered: false,
+    };
+
+    const next = [item, ...reminders];
     setReminders(next);
     await AsyncStorage.setItem(alertKey(animalId), JSON.stringify(next));
+
+    Alert.alert("OK", "Recordatorio programado.");
+    setRMsg("");
+  };
+
+  /* ---------- Cancelar recordatorio (eliminar) ---------- */
+  const cancelReminder = async (id) => {
+    const r = reminders.find((x) => x.id === id);
+    if (!r) return;
+
+    Alert.alert(
+      "Cancelar recordatorio",
+      "¿Seguro que deseas cancelar y eliminar este recordatorio?",
+      [
+        { text: "No", style: "cancel" },
+        {
+          text: "Sí, eliminar",
+          style: "destructive",
+          onPress: async () => {
+            if (r.nativeId) {
+              try {
+                await Notifications.cancelScheduledNotificationAsync(r.nativeId);
+              } catch {}
+            }
+            const remaining = reminders.filter((x) => x.id !== id);
+            setReminders(remaining);
+            await AsyncStorage.setItem(alertKey(animalId), JSON.stringify(remaining));
+          },
+        },
+      ]
+    );
+  };
+
+  /* ---------- Borrar Historiales con confirmación (FUNCIONANDO) ---------- */
+  const clearHistory = async (type) => {
+    const label =
+      type === "weights"
+        ? "historial de peso"
+        : type === "events"
+        ? "historial sanitario"
+        : "historial de alimentación";
+
+    Alert.alert(
+      "Borrar historial",
+      `¿Seguro que deseas borrar el ${label}? Esta acción no se puede deshacer.`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Borrar",
+          style: "destructive",
+          onPress: async () => {
+            const key = cacheKey(animalId);
+            const raw = await AsyncStorage.getItem(key);
+            const data = raw ? JSON.parse(raw) : {};
+
+            const next = {
+              weights: type === "weights" ? [] : Array.isArray(data.weights) ? data.weights : [],
+              events: type === "events" ? [] : Array.isArray(data.events) ? data.events : [],
+              feeding: type === "feeding" ? [] : Array.isArray(data.feeding) ? data.feeding : [],
+            };
+
+            if (type === "weights") setWeights([]);
+            if (type === "events") setEvents([]);
+            if (type === "feeding") setFeeding([]);
+
+            await writeCache(next);
+            Alert.alert("OK", `Se borró el ${label}.`);
+          },
+        },
+      ]
+    );
   };
 
   /* ---------- UI ---------- */
@@ -584,12 +712,24 @@ export default function HealthAndGrowthScreen({ route }) {
             </View>
             <View style={{ width: 110 }}>
               <Text style={styles.label}>Kg</Text>
-              <TextInput value={wKg} onChangeText={setWKg} keyboardType="numeric" style={styles.input} />
+              <TextInput
+                value={wKg}
+                onChangeText={setWKg}
+                keyboardType="numeric"
+                style={styles.input}
+              />
             </View>
           </View>
           <TouchableOpacity onPress={saveWeight} style={styles.saveBtn}>
             <MaterialCommunityIcons name="content-save" size={18} color={Colors.white} />
             <Text style={styles.saveText}>Guardar peso</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => clearHistory("weights")}
+            style={styles.deleteBtn}
+          >
+            <Text style={styles.deleteText}>Borrar historial de peso</Text>
           </TouchableOpacity>
         </View>
 
@@ -609,7 +749,10 @@ export default function HealthAndGrowthScreen({ route }) {
               <TouchableOpacity
                 key={t}
                 onPress={() => setEType(t)}
-                style={[styles.chip, eType === t && { backgroundColor: Colors.green, borderColor: Colors.green }]}
+                style={[
+                  styles.chip,
+                  eType === t && { backgroundColor: Colors.green, borderColor: Colors.green },
+                ]}
               >
                 <Text style={[styles.chipText, eType === t && { color: Colors.white }]}>{t}</Text>
               </TouchableOpacity>
@@ -629,6 +772,13 @@ export default function HealthAndGrowthScreen({ route }) {
             <MaterialCommunityIcons name="content-save" size={18} color={Colors.white} />
             <Text style={styles.saveText}>Guardar evento</Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => clearHistory("events")}
+            style={styles.deleteBtn}
+          >
+            <Text style={styles.deleteText}>Borrar historial sanitario</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Alimentación */}
@@ -641,11 +791,21 @@ export default function HealthAndGrowthScreen({ route }) {
             </View>
             <View style={{ width: 100 }}>
               <Text style={styles.label}>Kg</Text>
-              <TextInput value={fKg} onChangeText={setFKg} keyboardType="numeric" style={styles.input} />
+              <TextInput
+                value={fKg}
+                onChangeText={setFKg}
+                keyboardType="numeric"
+                style={styles.input}
+              />
             </View>
             <View style={{ width: 120 }}>
               <Text style={styles.label}>Costo</Text>
-              <TextInput value={fCost} onChangeText={setFCost} keyboardType="numeric" style={styles.input} />
+              <TextInput
+                value={fCost}
+                onChangeText={setFCost}
+                keyboardType="numeric"
+                style={styles.input}
+              />
             </View>
           </View>
 
@@ -662,9 +822,16 @@ export default function HealthAndGrowthScreen({ route }) {
             <MaterialCommunityIcons name="content-save" size={18} color={Colors.white} />
             <Text style={styles.saveText}>Guardar alimentación</Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => clearHistory("feeding")}
+            style={styles.deleteBtn}
+          >
+            <Text style={styles.deleteText}>Borrar historial de alimentación</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Recordatorios automáticos (H11) */}
+        {/* Recordatorios automáticos */}
         <View style={styles.panel}>
           <Text style={styles.sectionTitle}>Recordatorios automáticos</Text>
 
@@ -673,9 +840,36 @@ export default function HealthAndGrowthScreen({ route }) {
               <Text style={styles.label}>Fecha (YYYY-MM-DD)</Text>
               <TextInput value={rDate} onChangeText={setRDate} style={styles.input} />
             </View>
+
             <View style={{ width: 110 }}>
-              <Text style={styles.label}>Hora (HH:MM)</Text>
-              <TextInput value={rTime} onChangeText={setRTime} style={styles.input} placeholder="08:00" />
+              <Text style={styles.label}>Hora (hh:mm)</Text>
+              <TextInput
+                value={rTime}
+                onChangeText={setRTime}
+                style={styles.input}
+                placeholder="08:00"
+              />
+            </View>
+
+            <View style={{ width: 90 }}>
+              <Text style={styles.label}>AM / PM</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {["AM", "PM"].map((v) => (
+                  <TouchableOpacity
+                    key={v}
+                    onPress={() => setRAMPM(v)}
+                    style={[
+                      styles.chip,
+                      { paddingVertical: 8, paddingHorizontal: 10 },
+                      rAMPM === v && { backgroundColor: Colors.green, borderColor: Colors.green },
+                    ]}
+                  >
+                    <Text style={[styles.chipText, rAMPM === v && { color: Colors.white }]}>
+                      {v}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             </View>
           </View>
 
@@ -685,7 +879,10 @@ export default function HealthAndGrowthScreen({ route }) {
               <TouchableOpacity
                 key={t}
                 onPress={() => setRType(t)}
-                style={[styles.chip, rType === t && { backgroundColor: Colors.green, borderColor: Colors.green }]}
+                style={[
+                  styles.chip,
+                  rType === t && { backgroundColor: Colors.green, borderColor: Colors.green },
+                ]}
               >
                 <Text style={[styles.chipText, rType === t && { color: Colors.white }]}>{t}</Text>
               </TouchableOpacity>
@@ -724,7 +921,7 @@ export default function HealthAndGrowthScreen({ route }) {
                   }}
                 >
                   <Text style={{ color: Colors.text, fontWeight: "800", flex: 1 }}>
-                    {r.date} {r.time} — {r.type} · {r.message}
+                    {r.date} {r.time} {r.ampm} — {r.type} · {r.message}
                   </Text>
                   <TouchableOpacity
                     onPress={() => cancelReminder(r.id)}
@@ -786,7 +983,8 @@ export default function HealthAndGrowthScreen({ route }) {
             <View style={styles.listBox}>
               {feeding.map((f, i) => (
                 <Text key={i} style={styles.listItem}>
-                  {f.date} — {f.kg} kg {Number.isFinite(f.cost) && f.cost > 0 ? `· C$ ${f.cost}` : ""} {f.note ? `· ${f.note}` : ""}
+                  {f.date} — {f.kg} kg {Number.isFinite(f.cost) && f.cost > 0 ? `· C$ ${f.cost}` : ""}{" "}
+                  {f.note ? `· ${f.note}` : ""}
                 </Text>
               ))}
             </View>
@@ -813,9 +1011,9 @@ const styles = StyleSheet.create({
   label: { color: Colors.muted, fontWeight: "800", marginBottom: 6 },
   input: {
     backgroundColor: Colors.white,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 10,
     padding: 10,
     color: Colors.text,
     fontWeight: "700",
@@ -839,6 +1037,14 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   saveText: { color: Colors.white, fontWeight: "900" },
+  deleteBtn: {
+    backgroundColor: "#f8d7da",
+    borderRadius: 10,
+    paddingVertical: 10,
+    marginTop: 8,
+    alignItems: "center",
+  },
+  deleteText: { color: "#842029", fontWeight: "900" },
   listBox: {
     backgroundColor: "#f7f2ea",
     borderRadius: 12,

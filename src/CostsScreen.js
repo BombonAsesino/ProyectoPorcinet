@@ -9,6 +9,8 @@ import {
   TextInput,
   TouchableOpacity,
   Alert,
+  Image,
+  Modal,
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { auth, db } from "../database";
@@ -28,6 +30,9 @@ import {
 import { initDB, run, all } from "./db/database"; // <-- Asegura esta ruta
 import * as Network from "expo-network";
 import { useIsFocused } from "@react-navigation/native";
+
+/* ✅ Fotos */
+import * as ImagePicker from "expo-image-picker";
 
 /* ====== Estilos/colores ====== */
 const Colors = {
@@ -54,7 +59,11 @@ const normalizeDateStr = (val) => {
   if (typeof val === "object" && val.seconds != null) {
     return toYYYYMMDD(new Date(val.seconds * 1000));
   }
-  try { return toYYYYMMDD(new Date(val)); } catch { return toYYYYMMDD(new Date()); }
+  try {
+    return toYYYYMMDD(new Date(val));
+  } catch {
+    return toYYYYMMDD(new Date());
+  }
 };
 
 /* 🔧 Helpers de fecha */
@@ -76,18 +85,31 @@ const ensureCostSchema = async () => {
   await run(
     "CREATE TABLE IF NOT EXISTS costs (id INTEGER PRIMARY KEY AUTOINCREMENT, concept TEXT, category TEXT, amount REAL, date TEXT, notes TEXT, deleted INTEGER DEFAULT 0, updated_at TEXT);"
   );
-  try { await run("ALTER TABLE costs ADD COLUMN cloud_id TEXT"); } catch {}
-  try { await run("ALTER TABLE costs ADD COLUMN synced INTEGER DEFAULT 0"); } catch {}
-  try { await run("ALTER TABLE costs ADD COLUMN month_key TEXT"); } catch {}
-  await run("UPDATE costs SET month_key = substr(date,1,7) WHERE month_key IS NULL OR month_key=''");
+  try {
+    await run("ALTER TABLE costs ADD COLUMN cloud_id TEXT");
+  } catch {}
+  try {
+    await run("ALTER TABLE costs ADD COLUMN synced INTEGER DEFAULT 0");
+  } catch {}
+  try {
+    await run("ALTER TABLE costs ADD COLUMN month_key TEXT");
+  } catch {}
+  try {
+    await run("ALTER TABLE costs ADD COLUMN photo_uri TEXT");
+  } catch {}
+  await run(
+    "UPDATE costs SET month_key = substr(date,1,7) WHERE month_key IS NULL OR month_key=''"
+  );
   await run(
     "CREATE TABLE IF NOT EXISTS pending_ops (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, target_id TEXT NOT NULL, payload TEXT, created_at TEXT DEFAULT (datetime('now')));"
   );
   await run("CREATE INDEX IF NOT EXISTS idx_pending_ops_op ON pending_ops(op)");
-  await run("CREATE INDEX IF NOT EXISTS idx_pending_ops_target ON pending_ops(target_id)");
+  await run(
+    "CREATE INDEX IF NOT EXISTS idx_pending_ops_target ON pending_ops(target_id)"
+  );
 };
 
-export function CostsScreen() {
+export function CostsScreen({ navigation }) {   // ⬅️ AQUÍ recibe navigation
   const [expenses, setExpenses] = useState([]);
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Alimentación");
@@ -96,6 +118,13 @@ export function CostsScreen() {
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(true);
   const isFocused = useIsFocused();
+
+  /* ✅ Foto ligada al gasto */
+  const [imageUri, setImageUri] = useState(null);
+
+  /* ✅ Vista previa grande */
+  const [previewUri, setPreviewUri] = useState(null);
+  const [previewVisible, setPreviewVisible] = useState(false);
 
   const monthKey = getMonthKey(currentMonth);
 
@@ -106,12 +135,15 @@ export function CostsScreen() {
       await ensureCostSchema();
 
       // No mostrar elementos en cola de borrado remoto
-      const pendDel = await all("SELECT target_id FROM pending_ops WHERE op='delete'", []);
+      const pendDel = await all(
+        "SELECT target_id FROM pending_ops WHERE op='delete'",
+        []
+      );
       const pendingDeleteIds = new Set(pendDel.map((r) => r.target_id));
 
       // 1) Local primero
       const localRows = await all(
-        `SELECT id, category, amount, notes AS note, date, cloud_id
+        `SELECT id, category, amount, notes AS note, date, cloud_id, photo_uri
            FROM costs
           WHERE deleted=0 AND date LIKE ?
           ORDER BY date DESC, id DESC`,
@@ -127,6 +159,7 @@ export function CostsScreen() {
           note: r.note || "",
           dateStr: normalizeDateStr(r.date),
           cloud_id: cloudIdNorm.length ? cloudIdNorm : null,
+          photoUri: r.photo_uri || null,
         };
       });
 
@@ -159,6 +192,7 @@ export function CostsScreen() {
               note: data.note || "",
               dateStr: normalizeDateStr(data.date),
               cloud_id: d.id,
+              photoUri: data.photoUri || null, // 🔹 campo que también usa el backup
             });
           });
         }
@@ -178,8 +212,41 @@ export function CostsScreen() {
     }
   }, [monthKey]);
 
-  useEffect(() => { fetchExpenses(); }, [fetchExpenses]);
-  useEffect(() => { if (isFocused) fetchExpenses(); }, [isFocused, fetchExpenses]);
+  useEffect(() => {
+    fetchExpenses();
+  }, [fetchExpenses]);
+  useEffect(() => {
+    if (isFocused) fetchExpenses();
+  }, [isFocused, fetchExpenses]);
+
+  /* ====== Selector de imagen ====== */
+  const pickImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert("Permisos", "Se requiere permiso para acceder a la galería.");
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.7,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        setImageUri(result.assets[0].uri);
+      }
+    } catch (e) {
+      console.error("pickImage", e);
+      Alert.alert("Error", "No se pudo abrir la galería.");
+    }
+  };
+
+  const openPreview = (uri) => {
+    if (!uri) return;
+    setPreviewUri(uri);
+    setPreviewVisible(true);
+  };
 
   /* ====== Guardar (crear o actualizar) ====== */
   const saveExpense = async () => {
@@ -209,18 +276,47 @@ export function CostsScreen() {
 
       // preservamos fecha en edición
       const currentItem = editingId ? expenses.find((e) => e.id === editingId) : null;
-      const dateStr = editingId && currentItem?.dateStr ? currentItem.dateStr : baseStr;
+      const dateStr =
+        editingId && currentItem?.dateStr ? currentItem.dateStr : baseStr;
 
       if (editingId) {
         // Editar
         if (editingId.startsWith("local:")) {
           const localId = editingId.split(":")[1];
           await run(
-            `UPDATE costs SET category=?, amount=?, notes=?, date=?, month_key=?, updated_at=datetime('now'), synced=0 WHERE id=?`,
-            [category, amt, note.trim(), dateStr, getMonthKey(new Date(dateStr)), localId]
+            `UPDATE costs
+               SET category=?,
+                   amount=?,
+                   notes=?,
+                   photo_uri=?,
+                   date=?,
+                   month_key=?,
+                   updated_at=datetime('now'),
+                   synced=0
+             WHERE id=?`,
+            [
+              category,
+              amt,
+              note.trim(),
+              imageUri || null,
+              dateStr,
+              getMonthKey(new Date(dateStr)),
+              localId,
+            ]
           );
           setExpenses((prev) =>
-            prev.map((e) => (e.id === editingId ? { ...e, amount: amt, category, note, dateStr } : e))
+            prev.map((e) =>
+              e.id === editingId
+                ? {
+                    ...e,
+                    amount: amt,
+                    category,
+                    note,
+                    dateStr,
+                    photoUri: imageUri || null,
+                  }
+                : e
+            )
           );
           Alert.alert("Actualizado", "Gasto actualizado localmente.");
         } else {
@@ -232,34 +328,100 @@ export function CostsScreen() {
               date: new Date(dateStr),
               monthKey: getMonthKey(new Date(dateStr)),
               updatedAt: serverTimestamp(),
+              photoUri: imageUri || null, // 🔹 también en Firestore
             });
             await run(
-              `UPDATE costs SET category=?, amount=?, notes=?, date=?, month_key=?, synced=1, updated_at=datetime('now') WHERE cloud_id=?`,
-              [category, amt, note.trim(), dateStr, getMonthKey(new Date(dateStr)), editingId]
+              `UPDATE costs
+                 SET category=?,
+                     amount=?,
+                     notes=?,
+                     photo_uri=?,
+                     date=?,
+                     month_key=?,
+                     synced=1,
+                     updated_at=datetime('now')
+               WHERE cloud_id=?`,
+              [
+                category,
+                amt,
+                note.trim(),
+                imageUri || null,
+                dateStr,
+                getMonthKey(new Date(dateStr)),
+                editingId,
+              ]
             );
             setExpenses((prev) =>
-              prev.map((e) => (e.id === editingId ? { ...e, amount: amt, category, note, dateStr } : e))
+              prev.map((e) =>
+                e.id === editingId
+                  ? {
+                      ...e,
+                      amount: amt,
+                      category,
+                      note,
+                      dateStr,
+                      photoUri: imageUri || null,
+                    }
+                  : e
+              )
             );
             Alert.alert("Actualizado", "Gasto editado correctamente.");
           } else {
             // OFFLINE: espejo local con cloud_id y synced=0
-            const mirror = await all(`SELECT id FROM costs WHERE cloud_id=? LIMIT 1`, [editingId]);
+            const mirror = await all(
+              `SELECT id FROM costs WHERE cloud_id=? LIMIT 1`,
+              [editingId]
+            );
             if (mirror.length) {
               await run(
-                `UPDATE costs SET category=?, amount=?, notes=?, date=?, month_key=?, synced=0, updated_at=datetime('now') WHERE cloud_id=?`,
-                [category, amt, note.trim(), dateStr, getMonthKey(new Date(dateStr)), editingId]
+                `UPDATE costs
+                   SET category=?,
+                       amount=?,
+                       notes=?,
+                       photo_uri=?,
+                       date=?,
+                       month_key=?,
+                       synced=0,
+                       updated_at=datetime('now')
+                 WHERE cloud_id=?`,
+                [
+                  category,
+                  amt,
+                  note.trim(),
+                  imageUri || null,
+                  dateStr,
+                  getMonthKey(new Date(dateStr)),
+                  editingId,
+                ]
               );
             } else {
               await run(
-                `INSERT INTO costs (concept, category, amount, date, notes, deleted, updated_at, synced, cloud_id, month_key)
-                 VALUES (?, ?, ?, ?, ?, 0, datetime('now'), 0, ?, ?)`,
-                [category, category, amt, dateStr, note.trim(), editingId, getMonthKey(new Date(dateStr))]
+                `INSERT INTO costs
+                   (concept, category, amount, date, notes, photo_uri, deleted, updated_at, synced, cloud_id, month_key)
+                 VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'), 0, ?, ?)`,
+                [
+                  category,
+                  category,
+                  amt,
+                  dateStr,
+                  note.trim(),
+                  imageUri || null,
+                  editingId,
+                  getMonthKey(new Date(dateStr)),
+                ]
               );
             }
             setExpenses((prev) =>
               prev.map((e) =>
                 e.id === editingId
-                  ? { ...e, amount: amt, category, note, dateStr }
+                  ? {
+                      ...e,
+                      amount: amt,
+                      category,
+                      note,
+                      dateStr,
+                      photoUri: imageUri || null,
+                    }
                   : e
               )
             );
@@ -274,22 +436,42 @@ export function CostsScreen() {
             amount: amt,
             category,
             note: note.trim(),
-            date: baseDate,                                           // ✅ mes mostrado (clamp día)
-            monthKey: getMonthKey(baseDate),                          // ✅ mes mostrado
+            date: baseDate, // ✅ mes mostrado (clamp día)
+            monthKey: getMonthKey(baseDate), // ✅ mes mostrado
             createdAt: serverTimestamp(),
             updatedAt: null,
+            photoUri: imageUri || null, // 🔹 se guarda en Firestore
           });
           await run(
-            `INSERT INTO costs (concept, category, amount, date, notes, deleted, updated_at, synced, cloud_id, month_key)
-             VALUES (?, ?, ?, ?, ?, 0, datetime('now'), 1, ?, ?)`,
-            [category, category, amt, baseStr, note.trim(), ref.id, getMonthKey(baseDate)]
+            `INSERT INTO costs
+               (concept, category, amount, date, notes, photo_uri, deleted, updated_at, synced, cloud_id, month_key)
+             VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'), 1, ?, ?)`,
+            [
+              category,
+              category,
+              amt,
+              baseStr,
+              note.trim(),
+              imageUri || null,
+              ref.id,
+              getMonthKey(baseDate),
+            ]
           );
           Alert.alert("Guardado", "Gasto registrado.");
         } else {
           await run(
-            `INSERT INTO costs (concept, category, amount, date, notes, deleted, updated_at, synced, cloud_id, month_key)
-             VALUES (?, ?, ?, ?, ?, 0, datetime('now'), 0, NULL, ?)`,
-            [category, category, amt, baseStr, note.trim(), getMonthKey(baseDate)] // ✅ mes mostrado
+            `INSERT INTO costs
+               (concept, category, amount, date, notes, photo_uri, deleted, updated_at, synced, cloud_id, month_key)
+             VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now'), 0, NULL, ?)`,
+            [
+              category,
+              category,
+              amt,
+              baseStr,
+              note.trim(),
+              imageUri || null,
+              getMonthKey(baseDate),
+            ]
           );
           Alert.alert("Guardado", "Gasto guardado localmente (offline).");
         }
@@ -300,6 +482,7 @@ export function CostsScreen() {
       setNote("");
       setCategory("Alimentación");
       setEditingId(null);
+      setImageUri(null);
     } catch (e) {
       console.error("saveExpense", e);
       Alert.alert("Error", "No se pudo guardar el gasto.");
@@ -323,29 +506,58 @@ export function CostsScreen() {
 
             if (id.startsWith("local:")) {
               const localId = id.split(":")[1];
-              await run(`UPDATE costs SET deleted=1, updated_at=datetime('now') WHERE id=?`, [localId]);
+              await run(
+                `UPDATE costs SET deleted=1, updated_at=datetime('now') WHERE id=?`,
+                [localId]
+              );
 
-              const row = await all("SELECT cloud_id FROM costs WHERE id=?", [localId]);
+              const row = await all(
+                "SELECT cloud_id FROM costs WHERE id=?",
+                [localId]
+              );
               const cloudId = (row?.[0]?.cloud_id ?? "").trim();
               if (cloudId) {
                 if (net.isConnected) {
-                  try { await deleteDoc(doc(db, "costs", cloudId)); }
-                  catch { await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [cloudId]); }
+                  try {
+                    await deleteDoc(doc(db, "costs", cloudId));
+                  } catch {
+                    await run(
+                      "INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)",
+                      [cloudId]
+                    );
+                  }
                 } else {
-                  await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [cloudId]);
+                  await run(
+                    "INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)",
+                    [cloudId]
+                  );
                 }
               }
             } else {
-              await run(`UPDATE costs SET deleted=1, updated_at=datetime('now') WHERE cloud_id=?`, [id]);
+              await run(
+                `UPDATE costs SET deleted=1, updated_at=datetime('now') WHERE cloud_id=?`,
+                [id]
+              );
               if (net.isConnected) {
-                try { await deleteDoc(doc(db, "costs", id)); }
-                catch { await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [id]); }
+                try {
+                  await deleteDoc(doc(db, "costs", id));
+                } catch {
+                  await run(
+                    "INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)",
+                    [id]
+                  );
+                }
               } else {
-                await run("INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)", [id]);
+                await run(
+                  "INSERT INTO pending_ops(op, target_id) VALUES('delete', ?)",
+                  [id]
+                );
               }
             }
 
-            setExpenses((prev) => prev.filter((e) => e.id !== id && e.cloud_id !== id));
+            setExpenses((prev) =>
+              prev.filter((e) => e.id !== id && e.cloud_id !== id)
+            );
             Alert.alert("Eliminado", "Gasto eliminado.");
           } catch (e) {
             console.error("deleteExpense", e);
@@ -362,6 +574,7 @@ export function CostsScreen() {
     setAmount(String(item.amount ?? ""));
     setCategory(item.category || "Alimentación");
     setNote(item.note || "");
+    setImageUri(item.photoUri || null);
   };
 
   const cancelEdit = () => {
@@ -369,6 +582,7 @@ export function CostsScreen() {
     setAmount("");
     setNote("");
     setCategory("Alimentación");
+    setImageUri(null);
   };
 
   /* 🔁 Sincronizar locales al volver la conexión (creaciones + ediciones) */
@@ -383,7 +597,7 @@ export function CostsScreen() {
 
       // 1) Subir todos los registros creados offline (synced=0, cloud_id IS NULL)
       const newRows = await all(
-        `SELECT id, category, amount, notes, date, month_key
+        `SELECT id, category, amount, notes, date, month_key, photo_uri
            FROM costs
           WHERE deleted=0 AND synced=0 AND (cloud_id IS NULL OR cloud_id='')`
       );
@@ -401,6 +615,7 @@ export function CostsScreen() {
           monthKey: mk,
           createdAt: serverTimestamp(),
           updatedAt: null,
+          photoUri: r.photo_uri || null, // 🔹 se sube la foto también
         });
 
         await run(
@@ -411,7 +626,7 @@ export function CostsScreen() {
 
       // 2) Enviar EDICIONES offline (synced=0, cloud_id NOT NULL)
       const updRows = await all(
-        `SELECT id, cloud_id, category, amount, notes, date, month_key
+        `SELECT id, cloud_id, category, amount, notes, date, month_key, photo_uri
            FROM costs
           WHERE deleted=0 AND synced=0 AND cloud_id IS NOT NULL AND cloud_id <> ''`
       );
@@ -427,6 +642,7 @@ export function CostsScreen() {
           date: dateObj,
           monthKey: mk,
           updatedAt: serverTimestamp(),
+          photoUri: r.photo_uri || null, // 🔹 se sincroniza también en ediciones
         });
 
         await run(
@@ -436,7 +652,9 @@ export function CostsScreen() {
       }
 
       // 3) Procesar pendientes de eliminación
-      const pendDel = await all("SELECT id, target_id FROM pending_ops WHERE op='delete'");
+      const pendDel = await all(
+        "SELECT id, target_id FROM pending_ops WHERE op='delete'"
+      );
       for (const pd of pendDel) {
         try {
           await deleteDoc(doc(db, "costs", pd.target_id));
@@ -463,7 +681,9 @@ export function CostsScreen() {
         }
       } catch {}
     })();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, [isFocused]);
 
   /* ====== Cálculos ====== */
@@ -481,153 +701,311 @@ export function CostsScreen() {
   }, [expenses]);
 
   const validationOk =
-    Math.round(totals["Alimentación"] + totals["Salud"] + totals["Mantenimiento"]) ===
-    Math.round(totalGeneral);
+    Math.round(
+      totals["Alimentación"] + totals["Salud"] + totals["Mantenimiento"]
+    ) === Math.round(totalGeneral);
 
   /* ====== Cambio de mes (anclado al día 1 para evitar desbordes) ====== */
   const prevMonth = () => {
-    const d = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1); // ✅
+    const d = new Date(
+      currentMonth.getFullYear(),
+      currentMonth.getMonth() - 1,
+      1
+    ); // ✅
     setCurrentMonth(d);
   };
   const nextMonth = () => {
-    const d = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1); // ✅
+    const d = new Date(
+      currentMonth.getFullYear(),
+      currentMonth.getMonth() + 1,
+      1
+    ); // ✅
     setCurrentMonth(d);
   };
 
   /* ====== UI ====== */
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: Colors.beige }}>
-      {/* Header mes */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={prevMonth}>
-          <MaterialCommunityIcons name="chevron-left" size={28} color={Colors.white} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>
-          {currentMonth.toLocaleString("es-ES", { month: "long", year: "numeric" })}
-        </Text>
-        <TouchableOpacity onPress={nextMonth}>
-          <MaterialCommunityIcons name="chevron-right" size={28} color={Colors.white} />
-        </TouchableOpacity>
-      </View>
-
-      {/* Formulario */}
-      <View style={styles.panel}>
-        <Text style={styles.panelTitle}>
-          {editingId ? "Editar gasto" : "Registrar gasto"}
-        </Text>
-
-        <TextInput
-          placeholder="Monto"
-          keyboardType="numeric"
-          value={amount}
-          onChangeText={setAmount}
-          style={styles.input}
-        />
-        <TextInput
-          placeholder="Nota (opcional)"
-          value={note}
-          onChangeText={setNote}
-          style={styles.input}
-        />
-
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          {CATEGORIES.map((c) => (
-            <TouchableOpacity
-              key={c}
-              style={[styles.catBtn, category === c && { backgroundColor: Colors.green }]}
-              onPress={() => setCategory(c)}
-            >
-              <Text style={[styles.catText, category === c && { color: Colors.white }]}>
-                {c}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          <TouchableOpacity style={[styles.saveBtn, { flex: 1 }]} onPress={saveExpense}>
+    <>
+      <ScrollView style={{ flex: 1, backgroundColor: Colors.beige }}>
+        {/* Header mes */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={prevMonth}>
             <MaterialCommunityIcons
-              name={editingId ? "content-save-edit" : "content-save"}
-              size={20}
+              name="chevron-left"
+              size={28}
               color={Colors.white}
             />
-            <Text style={styles.saveText}>{editingId ? "Guardar cambios" : "Guardar gasto"}</Text>
           </TouchableOpacity>
-
-          {editingId ? (
-            <TouchableOpacity style={[styles.cancelBtn, { flex: 1 }]} onPress={cancelEdit}>
-              <MaterialCommunityIcons name="close-circle" size={20} color={Colors.bad} />
-              <Text style={[styles.saveText, { color: Colors.bad }]}>Cancelar</Text>
-            </TouchableOpacity>
-          ) : null}
-        </View>
-      </View>
-
-      {/* Reporte mensual */}
-      <View style={styles.panel}>
-        <Text style={styles.panelTitle}>Reporte mensual</Text>
-        {CATEGORIES.map((c) => (
-          <View key={c} style={styles.row}>
-            <Text style={styles.label}>{c}</Text>
-            <Text style={styles.value}>C$ {totals[c].toFixed(2)}</Text>
-          </View>
-        ))}
-        <View style={[styles.row, { borderTopWidth: 1, borderColor: Colors.border, paddingTop: 6 }]}>
-          <Text style={[styles.label, { fontWeight: "900" }]}>TOTAL</Text>
-          <Text style={[styles.value, { fontWeight: "900" }]}>C$ {totalGeneral.toFixed(2)}</Text>
-        </View>
-
-        <View style={{ marginTop: 10, flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <MaterialCommunityIcons
-            name={validationOk ? "check-circle" : "close-circle"}
-            size={20}
-            color={validationOk ? Colors.ok : Colors.bad}
-          />
-          <Text style={{ color: validationOk ? Colors.ok : Colors.bad, fontWeight: "700" }}>
-            {validationOk ? "Validación OK" : "Error en los cálculos"}
+          <Text style={styles.headerTitle}>
+            {currentMonth.toLocaleString("es-ES", {
+              month: "long",
+              year: "numeric",
+            })}
           </Text>
+          <TouchableOpacity onPress={nextMonth}>
+            <MaterialCommunityIcons
+              name="chevron-right"
+              size={28}
+              color={Colors.white}
+            />
+          </TouchableOpacity>
         </View>
-      </View>
 
-      {/* Listado del mes */}
-      <View style={styles.panel}>
-        <Text style={styles.panelTitle}>Gastos del mes</Text>
-        {loading ? (
-          <Text style={{ color: Colors.muted }}>Cargando…</Text>
-        ) : expenses.length === 0 ? (
-          <Text style={{ color: Colors.muted, fontWeight: "700" }}>No hay registros.</Text>
-        ) : (
-          expenses.map((it) => {
-            return (
-              <View key={it.id} style={styles.itemRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "900", color: Colors.text }}>
-                    {it.category} · C$ {Number(it.amount).toFixed(2)}
-                  </Text>
-                  {!!it.note && (
-                    <Text style={{ color: Colors.muted, fontWeight: "700" }} numberOfLines={1}>
-                      {it.note}
+        {/* Formulario */}
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>
+            {editingId ? "Editar gasto" : "Registrar gasto"}
+          </Text>
+
+          <TextInput
+            placeholder="Monto"
+            keyboardType="numeric"
+            value={amount}
+            onChangeText={setAmount}
+            style={styles.input}
+          />
+          <TextInput
+            placeholder="Nota (opcional)"
+            value={note}
+            onChangeText={setNote}
+            style={styles.input}
+          />
+
+          {/* Foto opcional */}
+          <Text style={styles.label}>Foto (opcional)</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <TouchableOpacity style={styles.photoBtn} onPress={pickImage}>
+              <MaterialCommunityIcons
+                name="image-plus"
+                size={20}
+                color={Colors.white}
+              />
+              <Text style={styles.photoBtnText}>
+                {imageUri ? "Cambiar foto" : "Adjuntar foto"}
+              </Text>
+            </TouchableOpacity>
+            {imageUri ? (
+              <TouchableOpacity onPress={() => openPreview(imageUri)}>
+                <Image
+                  source={{ uri: imageUri }}
+                  style={styles.thumbImage}
+                  resizeMode="cover"
+                />
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
+            {CATEGORIES.map((c) => (
+              <TouchableOpacity
+                key={c}
+                style={[
+                  styles.catBtn,
+                  category === c && { backgroundColor: Colors.green },
+                ]}
+                onPress={() => setCategory(c)}
+              >
+                <Text
+                  style={[
+                    styles.catText,
+                    category === c && { color: Colors.white },
+                  ]}
+                >
+                  {c}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TouchableOpacity
+              style={[styles.saveBtn, { flex: 1 }]}
+              onPress={saveExpense}
+            >
+              <MaterialCommunityIcons
+                name={editingId ? "content-save-edit" : "content-save"}
+                size={20}
+                color={Colors.white}
+              />
+              <Text style={styles.saveText}>
+                {editingId ? "Guardar cambios" : "Guardar gasto"}
+              </Text>
+            </TouchableOpacity>
+
+            {editingId ? (
+              <TouchableOpacity
+                style={[styles.cancelBtn, { flex: 1 }]}
+                onPress={cancelEdit}
+              >
+                <MaterialCommunityIcons
+                  name="close-circle"
+                  size={20}
+                  color={Colors.bad}
+                />
+                <Text style={[styles.saveText, { color: Colors.bad }]}>
+                  Cancelar
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
+
+        {/* Reporte mensual */}
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Reporte mensual</Text>
+          {CATEGORIES.map((c) => (
+            <View key={c} style={styles.row}>
+              <Text style={styles.label}>{c}</Text>
+              <Text style={styles.value}>C$ {totals[c].toFixed(2)}</Text>
+            </View>
+          ))}
+          <View
+            style={[
+              styles.row,
+              { borderTopWidth: 1, borderColor: Colors.border, paddingTop: 6 },
+            ]}
+          >
+            <Text style={[styles.label, { fontWeight: "900" }]}>TOTAL</Text>
+            <Text style={[styles.value, { fontWeight: "900" }]}>
+              C$ {totalGeneral.toFixed(2)}
+            </Text>
+          </View>
+
+          <View
+            style={{
+              marginTop: 10,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <MaterialCommunityIcons
+              name={validationOk ? "check-circle" : "close-circle"}
+              size={20}
+              color={validationOk ? Colors.ok : Colors.bad}
+            />
+            <Text
+              style={{
+                color: validationOk ? Colors.ok : Colors.bad,
+                fontWeight: "700",
+              }}
+            >
+              {validationOk ? "Validación OK" : "Error en los cálculos"}
+            </Text>
+          </View>
+
+          {/* Botón para ir a las gráficas */}
+          <TouchableOpacity
+            style={styles.verGraficasBtn}
+            onPress={() => navigation.navigate("CostsCharts")}
+          >
+            <MaterialCommunityIcons name="chart-bar" size={20} color="#fff" />
+            <Text style={styles.verGraficasText}>Ver gráficas</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Listado del mes */}
+        <View style={styles.panel}>
+          <Text style={styles.panelTitle}>Gastos del mes</Text>
+          {loading ? (
+            <Text style={{ color: Colors.muted }}>Cargando…</Text>
+          ) : expenses.length === 0 ? (
+            <Text style={{ color: Colors.muted, fontWeight: "700" }}>
+              No hay registros.
+            </Text>
+          ) : (
+            expenses.map((it) => {
+              return (
+                <View key={it.id} style={styles.itemRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={{ fontWeight: "900", color: Colors.text }}
+                    >{`${it.category} · C$ ${Number(it.amount).toFixed(
+                      2
+                    )}`}</Text>
+                    {!!it.note && (
+                      <Text
+                        style={{ color: Colors.muted, fontWeight: "700" }}
+                        numberOfLines={1}
+                      >
+                        {it.note}
+                      </Text>
+                    )}
+                    <Text style={{ color: Colors.muted, fontSize: 12 }}>
+                      {it.dateStr || ""}
                     </Text>
-                  )}
-                  <Text style={{ color: Colors.muted, fontSize: 12 }}>
-                    {it.dateStr || ""}
-                  </Text>
-                </View>
 
-                <View style={{ flexDirection: "row", gap: 8 }}>
-                  <TouchableOpacity style={styles.iconBtn} onPress={() => startEdit(it)} accessibilityLabel="Editar">
-                    <MaterialCommunityIcons name="pencil" size={20} color={Colors.green} />
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.iconBtn} onPress={() => deleteExpense(it.id)} accessibilityLabel="Eliminar">
-                    <MaterialCommunityIcons name="trash-can" size={20} color={Colors.bad} />
-                  </TouchableOpacity>
+                    {it.photoUri ? (
+                      <TouchableOpacity
+                        style={{ marginTop: 4, alignSelf: "flex-start" }}
+                        onPress={() => openPreview(it.photoUri)}
+                      >
+                        <Image
+                          source={{ uri: it.photoUri }}
+                          style={styles.thumbImage}
+                          resizeMode="cover"
+                        />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    <TouchableOpacity
+                      style={styles.iconBtn}
+                      onPress={() => startEdit(it)}
+                      accessibilityLabel="Editar"
+                    >
+                      <MaterialCommunityIcons
+                        name="pencil"
+                        size={20}
+                        color={Colors.green}
+                      />
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.iconBtn}
+                      onPress={() => deleteExpense(it.id)}
+                      accessibilityLabel="Eliminar"
+                    >
+                      <MaterialCommunityIcons
+                        name="trash-can"
+                        size={20}
+                        color={Colors.bad}
+                      />
+                    </TouchableOpacity>
+                  </View>
                 </View>
-              </View>
-            );
-          })
-        )}
-      </View>
-    </ScrollView>
+              );
+            })
+          )}
+        </View>
+      </ScrollView>
+
+      {/* Modal de vista previa de la foto */}
+      <Modal
+        visible={previewVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPreviewVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <TouchableOpacity
+            style={{ flex: 1 }}
+            activeOpacity={1}
+            onPress={() => setPreviewVisible(false)}
+          >
+            <View style={styles.modalContent}>
+              {previewUri ? (
+                <Image
+                  source={{ uri: previewUri }}
+                  style={styles.modalImage}
+                  resizeMode="contain"
+                />
+              ) : null}
+            </View>
+          </TouchableOpacity>
+        </View>
+      </Modal>
+    </>
   );
 }
 
@@ -719,11 +1097,69 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: Colors.white,
   },
+
+  photoBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: Colors.green,
+  },
+  photoBtnText: {
+    color: Colors.white,
+    fontWeight: "800",
+    marginLeft: 6,
+    fontSize: 13,
+  },
+  thumbImage: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalContent: {
+    padding: 10,
+    backgroundColor: Colors.white,
+    borderRadius: 12,
+    maxWidth: "90%",
+    maxHeight: "80%",
+  },
+  modalImage: {
+    width: 260,
+    height: 260,
+    borderRadius: 8,
+  },
+
+  // ⬇️ Estilos para el botón "Ver gráficas"
+  verGraficasBtn: {
+    marginTop: 12,
+    backgroundColor: Colors.green,
+    paddingVertical: 10,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  verGraficasText: {
+    color: Colors.white,
+    fontWeight: "900",
+    fontSize: 14,
+  },
 });
 
 /* ===========================
    🔁 Tus funciones de respaldo
-   (NO tocadas)
+   (ajustadas para incluir foto)
 =========================== */
 
 // Lee todos los gastos del usuario (para armar el payload del respaldo)
@@ -734,8 +1170,9 @@ export async function getExpensesForBackup(uid) {
   const snap = await getDocs(q);
   snap.forEach((d) => {
     const data = d.data();
-    const dateISO =
-      data.date?.toDate ? data.date.toDate().toISOString() : (data.date || null);
+    const dateISO = data.date?.toDate
+      ? data.date.toDate().toISOString()
+      : data.date || null;
     out.push({
       id: d.id,
       amount: Number(data.amount || 0),
@@ -743,8 +1180,13 @@ export async function getExpensesForBackup(uid) {
       note: data.note || "",
       monthKey: data.monthKey || (dateISO ? getMonthKey(new Date(dateISO)) : null),
       date: dateISO,
-      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
-      updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null,
+      createdAt: data.createdAt?.toMillis
+        ? data.createdAt.toMillis()
+        : null,
+      updatedAt: data.updatedAt?.toMillis
+        ? data.updatedAt.toMillis()
+        : null,
+      photoUri: data.photoUri || null, // 🔹 por si usas este backup clásico
     });
   });
   return out;
@@ -763,6 +1205,7 @@ export async function restoreExpensesFromBackup(uid, items = []) {
       date,
       monthKey: mk,
       createdAt: serverTimestamp(),
+      photoUri: it.photoUri || null, // 🔹 también se reescribe
     });
   }
 }
@@ -779,7 +1222,7 @@ export async function syncPendingCostsNow() {
 
     // Nuevos (sin cloud_id)
     const newRows = await all(
-      `SELECT id, category, amount, notes, date, month_key
+      `SELECT id, category, amount, notes, date, month_key, photo_uri
          FROM costs
         WHERE deleted=0 AND synced=0 AND (cloud_id IS NULL OR cloud_id='')`
     );
@@ -795,13 +1238,17 @@ export async function syncPendingCostsNow() {
         monthKey: mk,
         createdAt: serverTimestamp(),
         updatedAt: null,
+        photoUri: r.photo_uri || null,
       });
-      await run(`UPDATE costs SET synced=1, cloud_id=?, updated_at=datetime('now') WHERE id=?`, [ref.id, r.id]);
+      await run(
+        `UPDATE costs SET synced=1, cloud_id=?, updated_at=datetime('now') WHERE id=?`,
+        [ref.id, r.id]
+      );
     }
 
     // Ediciones (con cloud_id)
     const updRows = await all(
-      `SELECT id, cloud_id, category, amount, notes, date, month_key
+      `SELECT id, cloud_id, category, amount, notes, date, month_key, photo_uri
          FROM costs
         WHERE deleted=0 AND synced=0 AND cloud_id IS NOT NULL AND cloud_id <> ''`
     );
@@ -815,12 +1262,18 @@ export async function syncPendingCostsNow() {
         date: dateObj,
         monthKey: mk,
         updatedAt: serverTimestamp(),
+        photoUri: r.photo_uri || null,
       });
-      await run(`UPDATE costs SET synced=1, updated_at=datetime('now') WHERE id=?`, [r.id]);
+      await run(
+        `UPDATE costs SET synced=1, updated_at=datetime('now') WHERE id=?`,
+        [r.id]
+      );
     }
 
     // Deletes pendientes
-    const pendDel = await all("SELECT id, target_id FROM pending_ops WHERE op='delete'");
+    const pendDel = await all(
+      "SELECT id, target_id FROM pending_ops WHERE op='delete'"
+    );
     for (const pd of pendDel) {
       try {
         await deleteDoc(doc(db, "costs", pd.target_id));
@@ -832,5 +1285,4 @@ export async function syncPendingCostsNow() {
   }
 }
 
-/* 👇 (extra seguro) también exporto default SIN quitar tu export nombrado */
 export default CostsScreen;

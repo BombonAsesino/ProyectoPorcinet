@@ -8,7 +8,7 @@ import {
   TouchableOpacity,
   TextInput,
   Alert,
-  DeviceEventEmitter, // ⬅️ nuevo: broadcast inmediato al Home
+  DeviceEventEmitter,
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { auth, realtimeDb } from "../database";
@@ -38,19 +38,10 @@ function parseDateFlexible(v) {
 }
 function isoToday() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
 function monthKey(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-function formatYMD(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
 }
 function makeBucketsForHalf(year, startMonth) {
   const out = [];
@@ -64,7 +55,7 @@ function makeBucketsForHalf(year, startMonth) {
       weaned: 0,
       mortality: 0,
       start: new Date(year, m, 1),
-      end: new Date(year, m + 1, 0),
+      end: new Date(year, m+1, 0),
     });
   }
   return out;
@@ -82,46 +73,35 @@ function useRealtimeDashboardData() {
     const herdRef = ref(realtimeDb, `producers/${u.uid}/herd`);
     const evRef = ref(realtimeDb, `producers/${u.uid}/events`);
 
-    const offHerd = onValue(
-      herdRef,
-      (snap) => {
-        const v = snap.val() || {};
-        setHerd({
-          total: Number(v.total ?? 0),
-          sows: Number(v.sows ?? 0),
-          boars: Number(v.boars ?? 0),
-          growers: Number(v.growers ?? 0),
-        });
-      },
-      () => {}
-    );
+    const offHerd = onValue(herdRef, (snap) => {
+      const v = snap.val() || {};
+      setHerd({
+        total: Number(v.total ?? 0),
+        sows: Number(v.sows ?? 0),
+        boars: Number(v.boars ?? 0),
+        growers: Number(v.growers ?? 0),
+      });
+    });
 
-    const offEvents = onValue(
-      evRef,
-      (snap) => {
-        const arr = [];
-        snap.forEach((child) => {
-          const v = child.val() || {};
-          const d = parseDateFlexible(v.date);
-          if (!d) return;
-          arr.push({
-            id: child.key,
-            type: v.type,
-            count: Number(v.count ?? 0),
-            date: d,
-            createdAt: Number(v.createdAt ?? 0),
-          });
+    const offEvents = onValue(evRef, (snap) => {
+      const arr = [];
+      snap.forEach((child) => {
+        const v = child.val() || {};
+        const d = parseDateFlexible(v.date);
+        if (!d) return;
+        arr.push({
+          id: child.key,
+          type: v.type,
+          count: Number(v.count ?? 0),
+          date: d,
+          createdAt: Number(v.createdAt ?? 0),
         });
-        setEventsAll(arr);
-        setLoading(false);
-      },
-      () => setLoading(false)
-    );
+      });
+      setEventsAll(arr);
+      setLoading(false);
+    });
 
-    return () => {
-      offHerd();
-      offEvents();
-    };
+    return () => { offHerd(); offEvents(); };
   }, []);
 
   return { herd, eventsAll, loading };
@@ -139,6 +119,7 @@ function computeHalfMetrics(herd, eventsAll, startMonth, year = 2025) {
     const idx = buckets.findIndex((b) => b.key === key);
     if (idx === -1) return;
     const count = Number(ev.count ?? 0);
+
     if (ev.type === "farrowing") buckets[idx].farrowings += count || 1;
     if (ev.type === "weaning")  buckets[idx].weaned += Math.max(0, count);
     if (ev.type === "death")    buckets[idx].mortality += Math.max(0, count);
@@ -148,7 +129,7 @@ function computeHalfMetrics(herd, eventsAll, startMonth, year = 2025) {
   const totalFarrows = buckets.reduce((a, b) => a + b.farrowings, 0);
   const totalMortality = buckets.reduce((a, b) => a + b.mortality, 0);
 
-  const months = Math.max(buckets.length, 1);
+  const months = buckets.length;
   const avgWeanedPerMonth = totalWeaned / months;
   const avgFarrowPerMonth = totalFarrows / months;
   const avgMortality = Math.round(totalMortality / months);
@@ -158,12 +139,8 @@ function computeHalfMetrics(herd, eventsAll, startMonth, year = 2025) {
   const mortPct = herd.total > 0 ? Math.round((avgMortality / herd.total) * 100) : 0;
   const productivityPct = Math.min(100, Math.round((weanedPerSowMonth / 4.5) * 100));
 
-  const label =
-    startMonth === 0 ? `Enero ${year} – Junio ${year}` : `Julio ${year} – Diciembre ${year}`;
-
   return {
     buckets,
-    windowLabel: label,
     totals: { totalWeaned, totalFarrows, totalMortality },
     avgs: { avgWeanedPerMonth, avgFarrowPerMonth, avgMortality },
     kpis: { productivityPct, farrowRate, mortPct, weanedPerSowMonth },
@@ -195,16 +172,26 @@ export function ProductivityDashboardScreen() {
     [herd, eventsAll, startMonth, selectedYear]
   );
 
+  // ➕ NUEVO — cálculo del semestre anterior
+  const prevMetrics = useMemo(() => {
+    let prevY = selectedYear;
+    let prevStart = startMonth === 0 ? 6 : 0;
+    if (startMonth === 0) prevY = selectedYear - 1;
+    return computeHalfMetrics(herd, eventsAll, prevStart, prevY);
+  }, [herd, eventsAll, startMonth, selectedYear]);
+
+  const eficienciaActual = metrics?.kpis?.productivityPct ?? 0;
+  const eficienciaAnterior = prevMetrics?.kpis?.productivityPct ?? 0;
+  const diferenciaEficiencia = Math.round(eficienciaActual - eficienciaAnterior);
+
   useEffect(() => {
     const u = auth.currentUser;
     if (!u) return;
-    const pct = Number(metrics?.kpis?.productivityPct ?? 0);
-    if (!Number.isFinite(pct)) return;
     update(ref(realtimeDb, `producers/${u.uid}/metrics`), {
-      productivityPct: Math.max(0, Math.min(100, Math.round(pct))),
+      productivityPct: Math.max(0, Math.min(100, Math.round(eficienciaActual))),
       lastComputedAt: Date.now(),
-    }).catch(() => {});
-  }, [metrics?.kpis?.productivityPct]);
+    });
+  }, [eficienciaActual]);
 
   const [dateStr, setDateStr] = useState(isoToday());
   const [cntFarrow, setCntFarrow] = useState("1");
@@ -247,7 +234,6 @@ export function ProductivityDashboardScreen() {
       });
       Alert.alert("Guardado", "Evento registrado.");
     } catch (e) {
-      console.error("addEvent error", e);
       Alert.alert("Error", "No se pudo guardar el evento.");
     }
   };
@@ -273,17 +259,16 @@ export function ProductivityDashboardScreen() {
         updatedAt: Date.now(),
       });
 
-      // 🔔 Broadcast inmediato al Home (sin esperar onValue ni cambiar de pestaña)
       DeviceEventEmitter.emit("herd:updated", { total, sows, boars, growers });
 
       Alert.alert("Guardado", "Hato actualizado.");
     } catch (e) {
-      console.error("saveHerd error", e);
       Alert.alert("Error", "No se pudo guardar el hato.");
     }
   };
 
   const { startWindow, endWindow } = metrics.window || {};
+
   const eventsInWindowAll = useMemo(() => {
     if (!startWindow || !endWindow) return [];
     return eventsAll
@@ -299,24 +284,19 @@ export function ProductivityDashboardScreen() {
     const u = auth.currentUser;
     if (!u) return;
 
-    const count = eventsInWindowAll.length;
-    if (count === 0) {
-      Alert.alert("Sin registros", "No hay eventos en este semestre.");
-      return;
+    if (eventsInWindowAll.length === 0) {
+      return Alert.alert("Sin registros", "No hay eventos en este semestre.");
     }
 
-    const confirmText =
-      `¿Eliminar TODOS los ${count} registros de ` +
-      (startMonth === 0 ? `Enero–Junio ${selectedYear}` : `Julio–Diciembre ${selectedYear}`) +
-      `? Esta acción se puede deshacer.`;
-
-    Alert.alert("Eliminar semestre (6 meses)", confirmText, [
-      { text: "Cancelar", style: "cancel" },
-      {
-        text: "Eliminar todo",
-        style: "destructive",
-        onPress: async () => {
-          try {
+    Alert.alert(
+      "Eliminar semestre",
+      "¿Eliminar TODOS los registros de estos 6 meses?",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
             const items = eventsInWindowAll.map((evt) => ({
               id: evt.id,
               data: {
@@ -326,52 +306,43 @@ export function ProductivityDashboardScreen() {
                 createdAt: evt.createdAt || Date.now(),
               },
             }));
-            setBulkDeleted({
-              items,
-              windowLabel: startMonth === 0 ? `Ene–Jun ${selectedYear}` : `Jul–Dic ${selectedYear}`,
-            });
+            setBulkDeleted({ items });
 
             const updates = {};
             items.forEach((it) => {
               updates[`producers/${u.uid}/events/${it.id}`] = null;
             });
+
             await update(ref(realtimeDb), updates);
 
             setBulkUndoVisible(true);
-            if (bulkUndoTimer) clearTimeout(bulkUndoTimer);
-            const t = setTimeout(() => {
+            const timer = setTimeout(() => {
               setBulkUndoVisible(false);
               setBulkDeleted(null);
             }, 15000);
-            setBulkUndoTimer(t);
-          } catch (e) {
-            console.error("deleteSemester error", e);
-            Alert.alert("Error", "No se pudo eliminar el semestre.");
-          }
+            setBulkUndoTimer(timer);
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
   const undoDeleteSemester = async () => {
     const u = auth.currentUser;
     if (!u || !bulkDeleted?.items?.length) return;
 
-    try {
-      const updates = {};
-      bulkDeleted.items.forEach((it) => {
-        updates[`producers/${u.uid}/events/${it.id}`] = it.data;
-      });
-      await update(ref(realtimeDb), updates);
+    const updates = {};
+    bulkDeleted.items.forEach((it) => {
+      updates[`producers/${u.uid}/events/${it.id}`] = it.data;
+    });
 
-      setBulkUndoVisible(false);
-      setBulkDeleted(null);
-      if (bulkUndoTimer) clearTimeout(bulkUndoTimer);
-      Alert.alert("Restaurado", "Se devolvieron todos los registros del semestre.");
-    } catch (e) {
-      console.error("undoDeleteSemester error", e);
-      Alert.alert("Error", "No se pudo devolver el semestre.");
-    }
+    await update(ref(realtimeDb), updates);
+
+    setBulkUndoVisible(false);
+    setBulkDeleted(null);
+    if (bulkUndoTimer) clearTimeout(bulkUndoTimer);
+
+    Alert.alert("Restaurado", "Registros devueltos.");
   };
 
   const colorProd = pctColor(metrics.kpis.productivityPct, "positive");
@@ -384,7 +355,7 @@ export function ProductivityDashboardScreen() {
       contentContainerStyle={{ flexGrow: 1, padding: 16, paddingBottom: 160 }}
       showsVerticalScrollIndicator
     >
-      {/* KPIs */}
+      {/* KPIs principales */}
       <View style={styles.rowChips}>
         <KpiCard icon="pig-variant" label="Cerdos" value={herd.total} />
         <KpiCard icon="gender-female" label="Madres" value={herd.sows} />
@@ -396,6 +367,32 @@ export function ProductivityDashboardScreen() {
         />
       </View>
 
+      {/* ➕ NUEVO PANEL DE EFICIENCIA */}
+      <View style={styles.panel}>
+        <Text style={styles.panelTitle}>Evaluación de eficiencia</Text>
+
+        <Row label="Eficiencia actual" value={`${eficienciaActual}%`} />
+
+        <Row
+          label="Semestre anterior"
+          value={`${eficienciaAnterior}%`}
+          valueStyle={{ color: Colors.muted }}
+        />
+
+        <Separator />
+
+        <Row
+          label="Diferencia"
+          value={`${diferenciaEficiencia > 0 ? "+" : ""}${diferenciaEficiencia}%`}
+          valueStyle={{
+            color: diferenciaEficiencia >= 0 ? Colors.ok : Colors.bad,
+            fontWeight: "900",
+          }}
+        />
+      </View>
+
+      {/* CONTINÚA TODO TU DASHBOARD NORMALMENTE… */}
+      
       {/* Selector año/semestre */}
       <View style={{ marginTop: 12 }}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10 }}>
@@ -433,13 +430,11 @@ export function ProductivityDashboardScreen() {
 
       {/* Resumen ventana */}
       <View style={styles.panel}>
-        <View style={styles.panelHeaderRow}>
-          <Text style={styles.panelTitle}>
-            {startMonth === 0
-              ? `Enero ${selectedYear} – Junio ${selectedYear}`
-              : `Julio ${selectedYear} – Diciembre ${selectedYear}`}
-          </Text>
-        </View>
+        <Text style={styles.panelTitle}>
+          {startMonth === 0
+            ? `Enero ${selectedYear} – Junio ${selectedYear}`
+            : `Julio ${selectedYear} – Diciembre ${selectedYear}`}
+        </Text>
 
         <Row label="Destetados totales" value={metrics.totals.totalWeaned} />
         <Row label="Destetados / mes" value={Math.round(metrics.avgs.avgWeanedPerMonth)} />
@@ -458,19 +453,7 @@ export function ProductivityDashboardScreen() {
         <Row label="% del hato / mes" value={`${metrics.kpis.mortPct}%`} valueStyle={{ color: colorMortPct }} />
       </View>
 
-      {/* Barra deshacer masivo */}
-      {bulkUndoVisible && bulkDeleted ? (
-        <View style={[styles.undoBar, { backgroundColor: "#111827" }]}>
-          <Text style={{ color: Colors.white, fontWeight: "800", flex: 1 }} numberOfLines={2}>
-            Se eliminaron todos los registros de {bulkDeleted.windowLabel}. ¿Devolver?
-          </Text>
-          <TouchableOpacity style={styles.undoBtn} onPress={undoDeleteSemester}>
-            <Text style={{ color: Colors.green, fontWeight: "900" }}>DESHACER</Text>
-          </TouchableOpacity>
-        </View>
-      ) : null}
-
-      {/* Actividad por mes */}
+      {/* ACTIVIDAD POR MES */}
       <View style={styles.panel}>
         <Text style={styles.panelTitle}>Actividad por mes</Text>
         <View style={styles.table}>
@@ -491,7 +474,7 @@ export function ProductivityDashboardScreen() {
         </View>
       </View>
 
-      {/* Captura rápida */}
+      {/* CAPTURA RÁPIDA */}
       <View style={styles.panel}>
         <Text style={styles.panelTitle}>Captura rápida</Text>
 
@@ -514,7 +497,7 @@ export function ProductivityDashboardScreen() {
         </View>
       </View>
 
-      {/* Hato */}
+      {/* HATO */}
       <View style={styles.panel}>
         <Text style={styles.panelTitle}>Hato</Text>
 
@@ -559,6 +542,7 @@ function KpiCard({ label, value, icon, valueColor }) {
     </View>
   );
 }
+
 function Row({ label, value, hint, valueStyle }) {
   return (
     <View style={styles.row}>
@@ -570,9 +554,11 @@ function Row({ label, value, hint, valueStyle }) {
     </View>
   );
 }
+
 function Separator() {
   return <View style={styles.sep} />;
 }
+
 function NumberInput({ label, value, setValue }) {
   return (
     <View style={{ flex: 1 }}>
@@ -586,6 +572,7 @@ function NumberInput({ label, value, setValue }) {
     </View>
   );
 }
+
 function SmallBtn({ label, icon, onPress, bad }) {
   return (
     <TouchableOpacity
@@ -597,6 +584,7 @@ function SmallBtn({ label, icon, onPress, bad }) {
     </TouchableOpacity>
   );
 }
+
 function LabeledNumber({ label, value, setValue }) {
   return (
     <View style={{ flex: 1 }}>
@@ -669,18 +657,15 @@ const styles = StyleSheet.create({
     marginTop: 14,
     gap: 10,
   },
-  panelHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
+
   panelTitle: { fontSize: 16, fontWeight: "900", color: Colors.text },
 
   row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+
   label: { color: Colors.muted, fontWeight: "800" },
   value: { color: Colors.text, fontWeight: "900" },
-  hint: { color: Colors.muted, fontWeight: "700", fontSize: 11 },
+  hint: { color: Colors.muted, fontSize: 11 },
+
   sep: { height: 1, backgroundColor: Colors.border, marginVertical: 6 },
 
   table: {
@@ -701,24 +686,8 @@ const styles = StyleSheet.create({
   th: { flex: 1, fontWeight: "900", color: Colors.text },
   td: { flex: 1, fontWeight: "800", color: Colors.text },
 
-  undoBar: {
-    marginHorizontal: 16,
-    marginTop: 6,
-    backgroundColor: "#1f2937",
-    padding: 10,
-    borderRadius: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  undoBtn: {
-    backgroundColor: Colors.white,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-
   smallLabel: { color: Colors.muted, fontWeight: "800", fontSize: 12 },
+
   input: {
     backgroundColor: Colors.white,
     borderWidth: 1,
@@ -729,17 +698,19 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: Colors.text,
   },
+
   quickRow: { flexDirection: "row", alignItems: "flex-end", gap: 10, marginTop: 8 },
+
   smallBtn: {
     height: 44,
     paddingHorizontal: 12,
     borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
     flexDirection: "row",
+    alignItems: "center",
     gap: 8,
   },
   smallBtnText: { color: Colors.white, fontWeight: "900" },
+
   grid2: { flexDirection: "row", gap: 10 },
 
   actionsRow: {
@@ -748,12 +719,11 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 8,
   },
+
   btn: {
     flex: 1,
     height: 44,
     borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
